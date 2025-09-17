@@ -1,0 +1,24 @@
+[project]
+name = "remip-sample"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "ohtaman", email = "ohtamans@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "google-adk>=1.13.0",
+    "mcp>=1.13.1",
+    "nodejs-bin[cmd]>=18.4.0a4",
+    "pandas>=2.3.2",
+    "python-dotenv>=1.1.1",
+    "streamlit>=1.49.1",
+]
+
+[project.scripts]
+remip-sample = "remip_sample:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
