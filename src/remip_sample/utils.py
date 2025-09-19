@@ -58,4 +58,4 @@ def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:
         with tarfile.open(tarball_path, "r:gz") as f:
             f.extractall(base_path)
 
-    return bin_path
+    return bin_path.absolute()

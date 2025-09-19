@@ -3,9 +3,9 @@ import uuid
 import asyncio
 from typing import Optional, List
 
-import nest_asyncio
+# import nest_asyncio
 
-nest_asyncio.apply()
+# nest_asyncio.apply()
 
 import dotenv
 import streamlit as st
@@ -33,7 +33,10 @@ dotenv.load_dotenv(override=True)
 
 @st.cache_resource
 def get_event_loop() -> asyncio.EventLoop:
-    return asyncio.get_event_loop()
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        return asyncio.new_event_loop()
 
 @st.cache_resource
 def get_session_service() -> BaseSessionService:
@@ -206,10 +209,17 @@ async def main() -> None:
     if "user_id" not in st.session_state:
         st.session_state.user_id = str(uuid.uuid4())
 
-    st.write(os.getenv("STREAMLIT_RUNTIME"))
-    if os.getenv("STREAMLIT_RUNTIME") == "1":
+    import platform
+    st.write(platform.processor())
+    st.write(platform.processor() is None)
+    st.write(platform.processor() == "")
+    st.write(str(platform.processor()) == "")
+    st.write(f"processor = {platform.processor()}")
+    st.write(os.environ)
+    if platform.processor() == "":
         NODE_BIN_DIR = ensure_node()
-        os.environ["PATH"] = NODE_BIN_DIR + os.pathsep + os.environ.get("PATH", "")
+        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
+            os.environ["PATH"] = os.pathsep.join((str(NODE_BIN_DIR), os.environ.get("PATH", "")))
 
     import subprocess
     subprocess.run("node --version", shell=True)
