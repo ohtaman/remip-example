@@ -1,5 +1,10 @@
 """Utility functions for the remip-sample application."""
 
+import os
+import shutil
+import tarfile
+import urllib.request
+import pathlib
 import socket
 import time
 import subprocess
@@ -36,3 +41,21 @@ def start_remip_mcp() -> int:
 def finalize_response(text: str) -> str:
     """Light post-processing for final rendering."""
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:
+    base_path = pathlib.Path.cwd() / install_dir
+    node_path = base_path / f"node-v{version}-linux-x64"
+    bin_path = node_path / "bin"
+    node_path = bin_path / "node"
+
+    if not node_path.exists():
+        base_path.mkdir(parents=True, exist_ok=True)
+        url = f"https://nodejs.org/dist/v{version}/node-v{version}-linux-x64.tar.gz"
+        tarball_path = base_path / f"node-v{version}-linux-x64.tar.gz"
+        with urllib.request.urlopen(url) as r:
+            with open(tarball_path, "wb") as f:
+                f.write(r.read())
+        with tarfile.open(tarball_path, "r:gz") as f:
+            f.extractall(base_path)
+
+    return bin_path
