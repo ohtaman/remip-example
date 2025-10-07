@@ -1,5 +1,5 @@
 [project]
-name = "remip-sample"
+name = "remip-example"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -15,6 +15,7 @@ dependencies = [
     "nest-asyncio>=1.6.0",
     "google-adk>=1.14.1",
     "anyio>=4.4.0",
+    "aiosqlite>=0.21.0",
 ]
 
 [project.scripts]
