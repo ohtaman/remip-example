@@ -218,6 +218,9 @@ def build_agent(
 
 def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
     author = event.author
+    if event.content and event.content.role:
+        author = event.content.role
+
     if event.content is None:
         return author, None, None
 
@@ -360,6 +363,40 @@ def init():
         st.session_state.async_bridge = AsyncIteratorBridge()
 
 
+def render_messages(events: Iterable[Event]):
+    """Renders a list of events, grouping consecutive messages from the same author."""
+    last_author = None
+    full_response = ""
+    full_thoughts = ""
+    message_placeholder = None
+    thought_placeholder = None
+
+    for event in events:
+        author, response, thoughts = process_event(event)
+
+        if not author:
+            continue
+
+        if author != last_author:
+            # Start a new message block for the new author
+            full_response = ""
+            full_thoughts = ""
+            with st.chat_message(author):
+                message_placeholder = st.empty()
+                thought_placeholder = st.empty()
+            last_author = author
+
+        if response and message_placeholder:
+            full_response += response
+            message_placeholder.markdown(full_response, unsafe_allow_html=True)
+        
+        if thoughts and thought_placeholder:
+            full_thoughts += thoughts + "\n\n"
+            with thought_placeholder.container():
+                with st.expander("Show Thoughts"):
+                    st.markdown(full_thoughts)
+
+
 def render():
     with st.sidebar:
         st.title(APP_NAME)
@@ -374,6 +411,7 @@ def render():
 
     if create_new_session:
         clear_talk_session()
+        st.rerun()
     
     talk_session = get_talk_session()
     if talk_session is None:
@@ -382,29 +420,19 @@ def render():
             talk_session = create_talk_session(
                 user_id=st.session_state.user_id,
                 session_id=str(uuid.uuid4()),
-                state={
-                    "user_request": user_request
-                }
+                state={"user_request": user_request}
             )
         else:
             st.stop()
     else:
         user_request = None
 
-
     # Display historical events from the session.
-    for event in talk_session.events:
-        author, response, thoughts = process_event(event)
-        if author:
-            with st.chat_message(author):
-                if response:
-                    st.markdown(response, unsafe_allow_html=True)
-                if thoughts:
-                    with st.expander("Show Thoughts"):
-                        st.markdown(thoughts)
+    render_messages(talk_session.events)
 
     user_input = st.chat_input("Input your request") or user_request
     if user_input:
+        # Display the user's immediate input
         with st.chat_message("user"):
             st.markdown(user_input)
 
@@ -421,22 +449,9 @@ def render():
 
         st.session_state.async_bridge.start_task(_make_iter)
         
-        with st.chat_message("assistant"):
-            response_placeholder = st.empty()
-            thought_placeholder = st.empty()
-            full_response = ""
-            full_thoughts = ""
-
-            for event in st.session_state.async_bridge:
-                _, response, thoughts = process_event(event)
-                if response:
-                    full_response += response
-                    response_placeholder.markdown(full_response, unsafe_allow_html=True)
-                if thoughts:
-                    full_thoughts += thoughts + "\n\n"
-                    with thought_placeholder.container():
-                        with st.expander("Show Thoughts"):
-                            st.markdown(full_thoughts)
+        # Stream the live response
+        render_messages(st.session_state.async_bridge)
+        st.rerun()
 
 def main():
     st.set_page_config(page_title="remip-example", layout="wide")
