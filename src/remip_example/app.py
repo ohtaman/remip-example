@@ -218,9 +218,6 @@ def build_agent(
 
 def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
     author = event.author
-    if event.content and event.content.role:
-        author = event.content.role
-
     if event.content is None:
         return author, None, None
 
@@ -428,6 +425,7 @@ def render():
         user_request = None
 
     # Display historical events from the session.
+    st.write(talk_session.events)
     render_messages(talk_session.events)
 
     user_input = st.chat_input("Input your request") or user_request
