@@ -3,7 +3,6 @@ import os
 import pathlib
 import threading
 import queue
-import time
 from typing import Any, Generator, Iterable, Callable, Awaitable, AsyncIterator
 import uuid
 
@@ -43,62 +42,90 @@ class TalkSessionInfo:
 class AsyncIteratorBridge:
     def __init__(self):
         self.SENTINEL = object()
-        self._stop = threading.Event()
-        self.thread = None
-        self.q = None
-        self._factory: Callable[[], Awaitable[AsyncIterator[Any]]] | None = None
-        self._aiter: AsyncIterator[Any] | None = None
-
-    async def _produce(self):
-        try:
-            # Create the async iterator *inside this thread's loop*
-            self._aiter = await self._factory()
-            async for item in self._aiter:
-                if self._stop.is_set():
-                    # Graceful close on stop
-                    await self._aiter.aclose()
-                    break
-                self.q.put(item)
-        except Exception:
-            # TODO: logging
-            pass
-        finally:
-            try:
-                # Ensure we close in this loop if not closed yet
-                if self._aiter is not None:
-                    await self._aiter.aclose()
-            except Exception:
-                pass
-            self.q.put(self.SENTINEL)
-
-    def _runner(self):
-        # one loop per thread; creation+consumption happen here
-        asyncio.run(self._produce())
-
-    def run(self, factory: Callable[[], Awaitable[AsyncIterator[Any]]]) -> Generator[Any, Any, None]:
-        self.stop()
-        self._stop.clear()
-        self._factory = factory
         self.q = queue.Queue()
+        self._command_q = queue.Queue()
         self.thread = threading.Thread(target=self._runner, daemon=True)
         self.thread.start()
-        try:
-            while True:
-                item = self.q.get()
-                if item is self.SENTINEL:
-                    break
-                yield item
-        finally:
-            self.stop()
 
-    def stop(self):
-        if self.thread is not None and self.thread.is_alive():
-            self._stop.set()
-            self.thread.join(timeout=2.0)
-        self.thread = None
-        self.q = None
-        self._factory = None
-        self._aiter = None
+    def _runner(self):
+        """The main entry point for the background thread."""
+        try:
+            asyncio.run(self._producer_loop())
+        except Exception:
+            # In a real app, you'd want to log this.
+            pass
+
+    async def _producer_loop(self):
+        """The core async event loop for the background thread."""
+        agent_task = None
+        while True:
+            try:
+                # Check for commands without blocking the event loop.
+                command, data = self._command_q.get_nowait()
+
+                # If there's an existing agent task, cancel it gracefully.
+                if agent_task:
+                    agent_task.cancel()
+                    try:
+                        await agent_task
+                    except (asyncio.CancelledError, StopAsyncIteration):
+                        pass # Expected cancellation
+                
+                if command == 'START':
+                    factory = data
+                    # Start the new agent task.
+                    agent_task = asyncio.create_task(self._run_agent_task(factory))
+                elif command == 'STOP':
+                    # Task is already stopped, just clear the queue and signal completion.
+                    while not self.q.empty():
+                        self.q.get_nowait()
+                    self.q.put(self.SENTINEL)
+                    agent_task = None
+                elif command == 'TERMINATE':
+                    break # Exit the producer loop
+
+            except queue.Empty:
+                # No command, just let the event loop sleep briefly.
+                await asyncio.sleep(0.01)
+
+    async def _run_agent_task(self, factory):
+        """Runs the agent's async iterator and puts results on the response queue."""
+        try:
+            async_iterable = await factory()
+            async for item in async_iterable:
+                self.q.put(item)
+        except (asyncio.CancelledError, StopAsyncIteration):
+            # This is a normal, graceful exit.
+            pass
+        except Exception:
+            # In a real app, you'd want to log this.
+            pass
+        finally:
+            # Signal that this specific task is done.
+            self.q.put(self.SENTINEL)
+
+    def start_task(self, factory: Callable[[], Awaitable[AsyncIterator[Any]]]):
+        """Public method for the UI thread to start a new agent task."""
+        # Clear any stale items from the queue before starting a new task.
+        while not self.q.empty():
+            self.q.get_nowait()
+        self._command_q.put(('START', factory))
+
+    def stop_task(self):
+        """Public method for the UI thread to stop the current agent task."""
+        self._command_q.put(('STOP', None))
+
+    def __iter__(self) -> Generator[Any, Any, None]:
+        """Allows the UI thread to iterate over results from the response queue."""
+        while True:
+            item = self.q.get()
+            if item is self.SENTINEL:
+                break
+            yield item
+    
+    def __del__(self):
+        """Ensure the background thread is terminated when the bridge is garbage collected."""
+        self._command_q.put(('TERMINATE', None))
 
 
 
@@ -218,9 +245,8 @@ def new_session_form(example: str|None):
             return
 
 
-def chat_messages(events: Iterable[Event]):
-    for event in events:
-        st.write(event)
+def chat_messages(event: Event):
+    st.write(event)
 
 
 def get_talk_session() -> Session|None:
@@ -236,7 +262,9 @@ def get_talk_session() -> Session|None:
 
 def clear_talk_session():
     if "talk_session_info" in st.session_state:
-        st.session_state.async_bridge.stop()
+        # Send a command to the background thread to stop the current task.
+        st.session_state.async_bridge.stop_task()
+        
         talk_session_info = st.session_state.talk_session_info
         asyncio.run(get_session_service().delete_session(
             app_name=APP_NAME,
@@ -249,7 +277,6 @@ def clear_talk_session():
 def create_talk_session(user_id: str, session_id: str, state: dict|None=None) -> Session:
     state = state or {}
 
-    clear_talk_session()
     talk_session = asyncio.run(get_session_service().create_session(
         app_name=APP_NAME,
         user_id=user_id,
@@ -309,22 +336,27 @@ def render():
         user_request = None
 
 
-    chat_messages(talk_session.events)
+    # Display historical events from the session.
+    for event in talk_session.events:
+        chat_messages(event)
 
     user_input = st.chat_input("Input your request") or user_request
-    agent = build_agent(is_agent_mode=is_agent_mode)
-    runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
+    if user_input:
+        agent = build_agent(is_agent_mode=is_agent_mode)
+        runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
 
-    async def _make_iter() -> AsyncIterator[Event]:
-        return runner.run_async(
-            user_id=talk_session.user_id,
-            session_id=talk_session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text=user_input)]),
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS),
-        )
-
-    chat_messages(st.session_state.async_bridge.run(_make_iter))
-
+        async def _make_iter() -> AsyncIterator[Event]:
+            return runner.run_async(
+                user_id=talk_session.user_id,
+                session_id=talk_session.id,
+                new_message=types.Content(role="user", parts=[types.Part(text=user_input)]),
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS),
+            )
+        
+        # Start the new task and iterate over the results.
+        st.session_state.async_bridge.start_task(_make_iter)
+        for event in st.session_state.async_bridge:
+            chat_messages(event)
 
 def main():
     st.set_page_config(page_title="remip-example", layout="wide")
