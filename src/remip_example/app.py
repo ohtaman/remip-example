@@ -1,75 +1,133 @@
-# app.py
+from dataclasses import dataclass
 import os
 import pathlib
-import uuid
-import asyncio
 import threading
 import queue
-import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Generator, Iterable, Callable, Awaitable, AsyncIterator
+import uuid
+import json
 
-import dotenv
-import streamlit as st
-
+import asyncio
+from google.adk.agents import Agent, LoopAgent, RunConfig
+from google.adk.agents.run_config import StreamingMode
 from google.adk.events.event import Event
-from google.genai import types
-from google.genai import errors as google_errors
-from google.adk.agents import Agent, LoopAgent
-from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.planners import BuiltInPlanner
 from google.adk.runners import Runner
-from google.adk.sessions import DatabaseSessionService, BaseSessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+from google.adk.sessions import BaseSessionService, DatabaseSessionService, Session
 from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.tools import ToolContext, exit_loop
-
-from remip_example.utils import start_remip_mcp, ensure_node
+from google.genai import types
+import streamlit as st
+from remip_example.utils import start_remip_mcp
 from remip_example.config import (
     APP_NAME,
+    MENTOR_AGENT_INSTRUCTION,
     REMIP_AGENT_INSTRUCTION,
     NORMAL_MAX_CALLS,
+    REMIP_AGENT_MODEL,
     SESSION_DB_URL,
     EXAMPLES_DIR,
 )
 
-dotenv.load_dotenv(override=True)
 
-# =========================
-# Per-Streamlit-session async worker
-# =========================
+@dataclass
+class TalkSessionInfo:
+    session_id: str
+    user_id: str
+    user_request: str|None = None
+    agent_mode: bool|None = None
+    agent: Agent|None = None
 
-class AsyncSession:
-    """Background asyncio loop + queue per Streamlit session."""
+
+class AsyncIteratorBridge:
     def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.SENTINEL = object()
+        self.q = queue.Queue()
+        self._command_q = queue.Queue()
+        self.thread = threading.Thread(target=self._runner, daemon=True)
         self.thread.start()
-        self.out_queue: "queue.SimpleQueue[Dict[str, Any]]" = queue.SimpleQueue()
-        self.futures = set()
-        self.closed = False
 
-    def submit(self, coro) -> "asyncio.Future":
-        fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        self.futures.add(fut)
-        fut.add_done_callback(lambda _: self.futures.discard(fut))
-        return fut
+    def _runner(self):
+        """The main entry point for the background thread."""
+        try:
+            asyncio.run(self._producer_loop())
+        except Exception:
+            # In a real app, you'd want to log this.
+            pass
 
-    def cancel_all(self):
-        for f in list(self.futures):
-            f.cancel()
+    async def _producer_loop(self):
+        """The core async event loop for the background thread."""
+        agent_task = None
+        while True:
+            try:
+                # Check for commands without blocking the event loop.
+                command, data = self._command_q.get_nowait()
 
-    def close(self):
-        if self.closed:
-            return
-        self.closed = True
-        self.cancel_all()
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join(timeout=3)
+                # If there's an existing agent task, cancel it gracefully.
+                if agent_task:
+                    agent_task.cancel()
+                    try:
+                        await agent_task
+                    except (asyncio.CancelledError, StopAsyncIteration):
+                        pass # Expected cancellation
+                
+                if command == 'START':
+                    factory = data
+                    # Start the new agent task.
+                    agent_task = asyncio.create_task(self._run_agent_task(factory))
+                elif command == 'STOP':
+                    # Task is already stopped, just clear the queue and signal completion.
+                    while not self.q.empty():
+                        self.q.get_nowait()
+                    self.q.put(self.SENTINEL)
+                    agent_task = None
+                elif command == 'TERMINATE':
+                    break # Exit the producer loop
 
+            except queue.Empty:
+                # No command, just let the event loop sleep briefly.
+                await asyncio.sleep(0.01)
 
-@st.cache_resource
-def get_async_session(session_id: str) -> AsyncSession:
-    return AsyncSession()
+    async def _run_agent_task(self, factory):
+        """Runs the agent's async iterator and puts results on the response queue."""
+        try:
+            async_iterable = await factory()
+            async for item in async_iterable:
+                self.q.put(item)
+        except (asyncio.CancelledError, StopAsyncIteration):
+            # This is a normal, graceful exit.
+            pass
+        except Exception:
+            # In a real app, you'd want to log this.
+            pass
+        finally:
+            # Signal that this specific task is done.
+            self.q.put(self.SENTINEL)
+
+    def start_task(self, factory: Callable[[], Awaitable[AsyncIterator[Any]]]):
+        """Public method for the UI thread to start a new agent task."""
+        # Clear any stale items from the queue before starting a new task.
+        while not self.q.empty():
+            self.q.get_nowait()
+        self._command_q.put(('START', factory))
+
+    def stop_task(self):
+        """Public method for the UI thread to stop the current agent task."""
+        self._command_q.put(('STOP', None))
+
+    def __iter__(self) -> Generator[Any, Any, None]:
+        """Allows the UI thread to iterate over results from the response queue."""
+        while True:
+            item = self.q.get()
+            if item is self.SENTINEL:
+                break
+            yield item
+    
+    def __del__(self):
+        """Ensure the background thread is terminated when the bridge is garbage collected."""
+        self._command_q.put(('TERMINATE', None))
+
 
 
 @st.cache_resource
@@ -84,78 +142,62 @@ def get_mcp_toolset() -> McpToolset:
         connection_params=StreamableHTTPConnectionParams(
             url=f"http://localhost:{port}/mcp/",
             timeout=30,
-            terminate_on_close=False,
+            terminate_on_close=True,
         ),
     )
 
-# ==============
-# Agent
-# ==============
+
+@st.cache_resource
+def load_examples(language: str = "ja"):
+    examples_dir: pathlib.Path = pathlib.Path(EXAMPLES_DIR) / language
+    examples = {}
+    for path in examples_dir.glob("*.md"):
+        contents = open(path).readlines()
+        if contents:
+            examples[contents[0]] = "".join(contents)
+    return examples
+
 
 def build_agent(
-    api_key: Optional[str],
-    is_agentic: bool = True,
-    max_iterations: int = 10
+    is_agent_mode: bool = True,
+    max_iterations: int = 10,
+    thinking_budget: int = 2048,
+    api_key: str|None = None,
 ) -> Agent:
-    if api_key:
+    if api_key is not None:
         os.environ["GEMINI_API_KEY"] = api_key
 
+
     def ask(tool_context: ToolContext):
+        """Ask the user for additional information or confirmation based on the previous response.
+
+        Use this function whenever you need to request further details or confirmation from the user.
+        """
         return exit_loop(tool_context)
 
     remip_agent = Agent(
         name="remip",
-        model="gemini-2.5-pro",
+        model=REMIP_AGENT_MODEL,
         description="Agent for mathematical optimization",
-        instruction=(
-            "You are a Methematical Optimization Professional. You interact with user and provide "
-            "solutions using methematical optimization.\n\n## Best Practice:\n"
-        ) + REMIP_AGENT_INSTRUCTION,
+        instruction=REMIP_AGENT_INSTRUCTION,
         planner=BuiltInPlanner(
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True,
-                thinking_budget=1024 * 5,
+                thinking_budget=thinking_budget,
             )
         ),
         tools=[get_mcp_toolset()],
         output_key="work_result",
     )
 
-    if not is_agentic:
+    if not is_agent_mode:
         return remip_agent
 
-    judge_agent = Agent(
+    mentor_agent = Agent(
         name="judge",
         model="gemini-2.5-flash",
         description="Agent to judge whether to continue",
-        instruction=f"""## Your Task
-
-Check the response of remip_agent and judge whether to continue.
-
-IF the response of remip_agent is just confirming to continue:
-  Tell remip_agent to continue
-ELSE IF the response of remip_agent is asking to the user:
-  IF it is really necessary to ask something to the user:
-    Call ask tool
-  ELSE
-    Tell remip_agent to continue without asking anything to the user
-ELSE IF the user request is not related to the mathematical optimization:
-  Tell remip_agent to continue
-ELSE IF the response of remip_agent satisfies the user's request:
-  Tell remip_agent to continue
-ELSE IF you need to ask something to the user:
-  Call ask tool
-ELSE
-  Provide specific suggestions to the remip_agent concisely. 
-
-**!!IMPORTANT!!** YOU CAN NOT USE ANY TOOLS EXCEPT exit OR ask TOOL.
-
-## User Input
-{{{{user_input?}}}}
-
-## Response
-{{{{work_result?}}}}
-""",
+        instruction=MENTOR_AGENT_INSTRUCTION,
         planner=BuiltInPlanner(
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True,
@@ -168,345 +210,213 @@ ELSE
 
     agent = LoopAgent(
         name="orchestrator",
-        sub_agents=[remip_agent, judge_agent],
+        sub_agents=[remip_agent, mentor_agent],
         max_iterations=max_iterations,
     )
     return agent
 
-# =====================
-# Event -> markdown
-# =====================
 
-def process_event(event: Event) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Return (author, response_md, thoughts_md)."""
-    response = ""
-    thoughts = ""
-
+def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
+    author = event.author
     if event.content is None:
-        return None, None, None
+        return author, None, None
+
+    response_markdown = ""
+    thoughts_markdown = ""
 
     for part in event.content.parts:
-        markdown = getattr(part, "text") or ""
-        tool_call = getattr(part, "function_call")
-        tool_response = getattr(part, "function_response")
-
-        if tool_call is not None and tool_call.name not in ("ask", "exit_loop"):
-            markdown += (
-                f"\n\n<details>\n<summary>Call {tool_call.name}</summary><code>\n\n"
-                f"{tool_call}\n\n</code></details>\n\n"
+        if part.thought:
+            thoughts_markdown += part.text
+        elif part.function_call:
+            tool_name = part.function_call.name
+            tool_args = json.dumps(part.function_call.args, indent=2)
+            response_markdown += (
+                f'<details><summary>Tool Call: {tool_name}</summary>'
+                f'<pre>{tool_args}</pre></details>'
             )
-        if tool_response is not None and tool_response.name not in ("ask", "exit_loop"):
-            markdown += (
-                f"\n\n<details>\n<summary>Response {tool_response.name}</summary><code>\n\n"
-                f"{tool_response}\n\n</code></details>\n\n"
+        elif part.function_response:
+            tool_name = part.function_response.name
+            try:
+                tool_response = json.dumps(part.function_response.response, indent=2)
+            except TypeError:
+                tool_response = str(part.function_response.response)
+            response_markdown += (
+                f'<details><summary>Tool Response: {tool_name}</summary>'
+                f'<pre>{tool_response}</pre></details>'
             )
-        if getattr(part, "thought", False):
-            thoughts += markdown
-        elif markdown:
-            response += markdown
+        elif part.text:
+            response_markdown += part.text
+        
+    return author, response_markdown or None, thoughts_markdown or None
 
-    return event.author, (response or None), (thoughts or None)
 
-# ===========================
-# Background stream (no Streamlit APIs here!)
-# ===========================
+def settings_form():
+    with st.form("Settings", border=False):
+        with st.expander("Settings"):
+            language = st.selectbox("Language", ["ja", "en"])
+            is_agent_mode = st.toggle("Agent Mode")
+            is_submit = st.form_submit_button("Submit", use_container_width=True)
 
-async def worker_stream(
-    sess: AsyncSession,
-    session_service: BaseSessionService,  # <-- resolved on main thread
-    app_name: str,
-    agent: Agent,
-    talk_session,
-    prompt: str
-):
-    """Run the async stream; push chunks into sess.out_queue."""
-    runner = Runner(agent=agent, app_name=app_name, session_service=session_service)
+    return language, is_agent_mode, is_submit
 
-    try:
-        await asyncio.sleep(0)  # cooperative start
-        async for event in runner.run_async(
-            user_id=talk_session.user_id,
-            session_id=talk_session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS),
-        ):
-            author, resp, thoughts = process_event(event)
-            if resp:
-                sess.out_queue.put({"author": author, "markdown": resp})
-            if thoughts:
-                sess.out_queue.put({"author": author, "markdown": f"**Thoughts:**\n{thoughts}"})
-            await asyncio.sleep(0)
-
-    except google_errors.ServerError as e:
-        sess.out_queue.put({"author": "system", "markdown": f":warning: Server error: {e}"})
-    except asyncio.CancelledError:
-        # If runner has an explicit close(), you can await it here.
-        raise
-    except Exception as e:
-        sess.out_queue.put({"author": "system", "markdown": f":x: Unexpected error: {e}"})
-    finally:
-        # Signal completion if you want (optional)
-        sess.out_queue.put({"author": "system", "done": True})
-
-# =============
-# UI helpers
-# =============
-
-def drain_outbox_and_render(sess: AsyncSession, chat_container) -> bool:
-    """
-    Move pending worker messages into chat_log and render all.
-    Returns True if new messages arrived.
-    """
-    changed = False
-    while True:
-        try:
-            msg = sess.out_queue.get_nowait()
-        except queue.Empty:
-            break
-        if msg.get("done"):
-            st.session_state.stream_done = True
-        else:
-            st.session_state.chat_log.append({
-                "author": msg.get("author") or "assistant",
-                "markdown": msg.get("markdown") or "",
-            })
-            changed = True
-
-    with chat_container:
-        for item in st.session_state.chat_log:
-            with st.chat_message(item["author"]):
-                st.markdown(item["markdown"], unsafe_allow_html=True)
-
-    return changed
-
-def schedule_autorerun_if_streaming():
-    """Trigger throttled reruns while a stream is active."""
-    fut = st.session_state.get("current_future")
-    if fut and not fut.done():
-        now = time.monotonic()
-        if now - st.session_state.get("last_rerun_at", 0.0) >= 0.1:  # ~10 fps
-            st.session_state.last_rerun_at = now
-            st.rerun()
-
-def submit_stream(sess: AsyncSession, session_service: BaseSessionService, app_name: str, agent: Agent, talk_session, prompt: str):
-    """Start streaming and keep its Future in session_state."""
-    fut0 = st.session_state.get("current_future")
-    if fut0 and not fut0.done():
-        fut0.cancel()
-
-    fut = sess.submit(worker_stream(sess, session_service, app_name, agent, talk_session, prompt))
-    st.session_state.current_future = fut
-    st.session_state.last_rerun_at = 0.0
-    st.session_state.stream_done = False
-
-def stop_stream():
-    fut = st.session_state.get("current_future")
-    if fut and not fut.done():
-        fut.cancel()
-        st.toast("Stopped current task.", icon="🛑")
-
-# =======================
-# Sidebar / simple UI
-# =======================
 
 @st.dialog("GEMINI API KEY")
-def get_api_key_dialog():
+def api_key_dialog() -> str|None:
     api_key = st.text_input("Gemini API Key", type="password")
     if st.button("Submit"):
-        st.session_state.api_key = api_key
-        st.rerun()
+        return api_key
+    else:
+        return
 
-@st.cache_resource
-def load_examples(language: str = "ja"):
-    examples_dir: pathlib.Path = pathlib.Path(EXAMPLES_DIR) / language
-    examples = {}
-    for path in examples_dir.glob("*.md"):
-        contents = open(path).readlines()
-        if contents:
-            examples[contents[0]] = "".join(contents)
-    return examples
 
-def render_sidebar(is_in_talk_session: bool):
-    with st.sidebar:
-        language = st.selectbox(
-            "Language",
-            [("English", "en"), ("Japanese", "ja")],
-            format_func=lambda m: m[0],
-            disabled=is_in_talk_session,
-        )
-        examples = load_examples(language[1])
-        example = st.selectbox(
-            "Use Examples",
-            options=["Do not use example"] + list(examples.keys()),
-            disabled=is_in_talk_session,
-        )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if is_in_talk_session and st.button("New Session", use_container_width=True):
-                try:
-                    get_async_session(st.session_state.session_id).close()
-                except Exception:
-                    pass
-                st.session_state.pop("session_id", None)
-                st.session_state.pop("current_future", None)
-                st.session_state.pop("chat_log", None)
-                st.rerun()
-        with col2:
-            if st.button("Stop", use_container_width=True):
-                stop_stream()
-
-    return example, examples
-
-# =======================
-# Views
-# =======================
-
-def render_new_session_view(example: str, examples: dict) -> None:
-    with st.container():
+def new_session_form(example: str|None):
+    with st.form("new_session"):
         user_request = st.text_area(
-            label="Input your request", value=examples.get(example, ""), height=280
+            label="Input your request", value=example, height=280
         )
-        if st.button("Submit", disabled=(not user_request.strip()), use_container_width=True):
-            st.session_state.session_id = str(uuid.uuid4())
-            st.session_state.user_request = user_request
-            user_id_val = st.session_state.get("user_id") or str(uuid.uuid4())
-            st.session_state.user_id = user_id_val
+        if st.form_submit_button("Submit", use_container_width=True):
+            return user_request
+        else:
+            return
 
-            sess = get_async_session(st.session_state.session_id)
-            svc = get_session_service()  # resolve on main thread
 
-            async def _create_session_with(svc_, app_name: str, user_id: str, session_id: str, state: dict):
-                return await svc_.create_session(
-                    app_name=app_name,
-                    user_id=user_id,
-                    session_id=session_id,
-                    state=state,
-                )
 
-            fut = sess.submit(_create_session_with(
-                svc, APP_NAME, user_id_val, st.session_state.session_id, {"user_request": user_request}
-            ))
-            _ = fut.result(timeout=10)
+def get_talk_session() -> Session|None:
+    if "talk_session_info" in st.session_state:
+        talk_session_info = st.session_state.talk_session_info
+        return asyncio.run(get_session_service().get_session(
+            app_name=APP_NAME,
+            user_id=talk_session_info.user_id,
+            session_id=talk_session_info.session_id,
+        ))
+    return None
 
-            st.session_state.agent = build_agent(
-                api_key=st.session_state.api_key, max_iterations=10
-            )
-            st.rerun()
-    st.stop()
 
-def render_chat_interface(sess: AsyncSession, session_service: BaseSessionService, talk_session) -> None:
-    user_request_container = st.container(height=120)
-    chat_container = st.container()
+def clear_talk_session():
+    if "talk_session_info" in st.session_state:
+        # Send a command to the background thread to stop the current task.
+        st.session_state.async_bridge.stop_task()
+        
+        talk_session_info = st.session_state.talk_session_info
+        asyncio.run(get_session_service().delete_session(
+            app_name=APP_NAME,
+            user_id=talk_session_info.user_id,
+            session_id=talk_session_info.session_id,
+        ))
+        del(st.session_state.talk_session_info)
 
-    user_request = talk_session.state.get("user_request", st.session_state.get("user_request", ""))
 
-    with user_request_container:
-        st.markdown(user_request or "")
+def create_talk_session(user_id: str, session_id: str, state: dict|None=None) -> Session:
+    state = state or {}
 
-    # Past events (non-final) once — optional; keep simple
-    with chat_container:
-        author = None
-        for event in talk_session.events[1:]:
-            a, response, _ = process_event(event)
-            if response and not event.is_final_response():
-                if author != a:
-                    author = a
-                    container = st.chat_message(author)
-                container.markdown(response, unsafe_allow_html=True)
+    talk_session = asyncio.run(get_session_service().create_session(
+        app_name=APP_NAME,
+        user_id=user_id,
+        session_id=session_id,
+        state=state,
+    ))
+    st.session_state.talk_session_info = TalkSessionInfo(
+        user_id=user_id,
+        session_id=session_id,
+    )
+    return talk_session
 
-    # New input
-    prompt = st.chat_input("Type your message")
-    if prompt:
-        with chat_container:
-            with st.chat_message("user"):
-                st.markdown(prompt)
-        agent = st.session_state.agent
-        submit_stream(sess, session_service, APP_NAME, agent, talk_session, prompt)
 
-    # Drain + render everything accumulated so far
-    changed = drain_outbox_and_render(sess, chat_container)
-    # Keep UI ticking while stream is alive
-    schedule_autorerun_if_streaming()
-
-def render_app() -> None:
-    st.set_page_config(page_title="remip-example", layout="wide")
-
-    # Persistent render state for streaming
-    if "chat_log" not in st.session_state:
-        st.session_state.chat_log = []
-    if "last_rerun_at" not in st.session_state:
-        st.session_state.last_rerun_at = 0.0
-    if "stream_done" not in st.session_state:
-        st.session_state.stream_done = True
-
-    # Init
+def init():
     if "api_key" not in st.session_state:
-        api_key = os.environ.get("GEMINI_API_KEY") or get_api_key_dialog()
+        api_key = os.environ.get("GEMINI_API_KEY") or api_key_dialog()
+        if not api_key:
+            st.rerun()
         st.session_state.api_key = api_key
 
     if "user_id" not in st.session_state:
         st.session_state.user_id = str(uuid.uuid4())
 
-    import platform
-    if platform.processor() == "":
-        NODE_BIN_DIR = ensure_node()
-        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
-            os.environ["PATH"] = os.pathsep.join(
-                (str(NODE_BIN_DIR), os.environ.get("PATH", ""))
+    if "async_bridge" not in st.session_state:
+        st.session_state.async_bridge = AsyncIteratorBridge()
+
+
+def render():
+    with st.sidebar:
+        st.title(APP_NAME)
+        pf = st.container()
+        st.divider()
+        language, is_agent_mode, is_submit = settings_form()
+        with pf:
+            examples = load_examples(language)
+            example_title = st.selectbox("Example Prompt", ["write by hand"] + list(examples.keys()))
+            example = examples.get(example_title, "")
+            create_new_session = st.button("New Session", use_container_width=True)
+
+    if create_new_session:
+        clear_talk_session()
+    
+    talk_session = get_talk_session()
+    if talk_session is None:
+        user_request = new_session_form(example)
+        if user_request:
+            talk_session = create_talk_session(
+                user_id=st.session_state.user_id,
+                session_id=str(uuid.uuid4()),
+                state={
+                    "user_request": user_request
+                }
             )
-
-    is_in_talk_session = "session_id" in st.session_state
-    example, examples = render_sidebar(is_in_talk_session)
-
-    # Per-session async worker
-    sess = get_async_session(st.session_state.get("session_id", "global"))
-
-    if not is_in_talk_session:
-        render_new_session_view(example, examples)
-    else:
-        user_id_val = st.session_state.user_id
-        session_id_val = st.session_state.session_id
-
-        svc = get_session_service()  # resolve on main thread
-
-        async def _load_session_with(svc_, app_name: str, user_id: str, session_id: str):
-            return await svc_.get_session(
-                app_name=app_name,
-                user_id=user_id,
-                session_id=session_id,
-            )
-
-        fut = sess.submit(_load_session_with(svc, APP_NAME, user_id_val, session_id_val))
-        talk_session = fut.result(timeout=10)
-
-        if talk_session is None:
-            async def _create_then_load_with(svc_, app_name: str, user_id: str, session_id: str, state: dict):
-                await svc_.create_session(
-                    app_name=app_name,
-                    user_id=user_id,
-                    session_id=session_id,
-                    state=state,
-                )
-                return await svc_.get_session(
-                    app_name=app_name,
-                    user_id=user_id,
-                    session_id=session_id,
-                )
-            fut2 = sess.submit(_create_then_load_with(
-                svc, APP_NAME, user_id_val, session_id_val, {"user_request": st.session_state.get("user_request", "")}
-            ))
-            talk_session = fut2.result(timeout=10)
-
-        if talk_session is None:
-            st.error("Failed to initialize talk session. Please try again.")
+        else:
             st.stop()
+    else:
+        user_request = None
 
-        # First visit after creation: kick off with the initial request, if any
-        if len(talk_session.events) == 0 and st.session_state.get("user_request"):
-            agent = st.session_state.agent
-            submit_stream(sess, svc, APP_NAME, agent, talk_session, st.session_state.user_request)
 
-        render_chat_interface(sess, svc, talk_session)
+    # Display historical events from the session.
+    for event in talk_session.events:
+        author, response, thoughts = process_event(event)
+        if author:
+            with st.chat_message(author):
+                if response:
+                    st.markdown(response, unsafe_allow_html=True)
+                if thoughts:
+                    with st.expander("Show Thoughts"):
+                        st.markdown(thoughts)
 
-render_app()
+    user_input = st.chat_input("Input your request") or user_request
+    if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        agent = build_agent(is_agent_mode=is_agent_mode)
+        runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
+
+        async def _make_iter() -> AsyncIterator[Event]:
+            return runner.run_async(
+                user_id=talk_session.user_id,
+                session_id=talk_session.id,
+                new_message=types.Content(role="user", parts=[types.Part(text=user_input)]),
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS),
+            )
+
+        st.session_state.async_bridge.start_task(_make_iter)
+        
+        with st.chat_message("assistant"):
+            thought_container = st.expander("Show Thoughts")
+
+            def stream_processor():
+                full_thoughts = ""
+                for event in st.session_state.async_bridge:
+                    _, response, thoughts = process_event(event)
+                    if response:
+                        yield response
+                    if thoughts:
+                        full_thoughts += thoughts + "\n\n"
+                        thought_container.markdown(full_thoughts)
+
+            st.write_stream(stream_processor)
+
+def main():
+    st.set_page_config(page_title="remip-example", layout="wide")
+    init()
+    render()
+
+
+if __name__ == "__main__":
+    main()

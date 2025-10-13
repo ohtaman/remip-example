@@ -134,6 +134,43 @@ def test_process_event_with_empty_content():
     assert author == "assistant"
     assert response is None
     assert thoughts is None
+
+
+def test_process_event_with_unserializable_response():
+    """Test case for a tool response that is not JSON serializable."""
+    # Mock object to simulate the non-serializable CallToolResult
+    class CallToolResult:
+        def __init__(self, data):
+            self.data = data
+        def __str__(self):
+            return f"CallToolResult(data={self.data})"
+        def __repr__(self):
+            return self.__str__()
+
+    tool_result = CallToolResult({"status": "success"})
+
+    event = Event(
+        author="tool",
+        content=Content(
+            role="tool",
+            parts=[
+                Part(
+                    function_response=FunctionResponse(
+                        name="my_tool",
+                        response={"result": tool_result},
+                    )
+                )
+            ],
+        ),
+    )
+    author, response, thoughts = process_event(event)
+    assert author == "tool"
+    expected_html = (
+        '<details><summary>Tool Response: my_tool</summary>'
+        f'<pre>{str({"result": tool_result})}</pre></details>'
+    )
+    assert response == expected_html
+    assert thoughts is None
     
     
 def test_process_event_with_none_content():
