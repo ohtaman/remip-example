@@ -5,6 +5,7 @@ import threading
 import queue
 from typing import Any, Generator, Iterable, Callable, Awaitable, AsyncIterator
 import uuid
+import json
 
 import asyncio
 from google.adk.agents import Agent, LoopAgent, RunConfig
@@ -215,6 +216,37 @@ def build_agent(
     return agent
 
 
+def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
+    author = event.author
+    if event.content is None:
+        return author, None, None
+
+    response_markdown = ""
+    thoughts_markdown = ""
+
+    for part in event.content.parts:
+        if part.thought:
+            thoughts_markdown += part.text
+        elif part.function_call:
+            tool_name = part.function_call.name
+            tool_args = json.dumps(part.function_call.args, indent=2)
+            response_markdown += (
+                f'<details><summary>Tool Call: {tool_name}</summary>'
+                f'<pre>{tool_args}</pre></details>'
+            )
+        elif part.function_response:
+            tool_name = part.function_response.name
+            tool_response = json.dumps(part.function_response.response, indent=2)
+            response_markdown += (
+                f'<details><summary>Tool Response: {tool_name}</summary>'
+                f'<pre>{tool_response}</pre></details>'
+            )
+        elif part.text:
+            response_markdown += part.text
+        
+    return author, response_markdown or None, thoughts_markdown or None
+
+
 def settings_form():
     with st.form("Settings", border=False):
         with st.expander("Settings"):
@@ -244,9 +276,6 @@ def new_session_form(example: str|None):
         else:
             return
 
-
-def chat_messages(event: Event):
-    st.write(event)
 
 
 def get_talk_session() -> Session|None:
@@ -338,10 +367,20 @@ def render():
 
     # Display historical events from the session.
     for event in talk_session.events:
-        chat_messages(event)
+        author, response, thoughts = process_event(event)
+        if author:
+            with st.chat_message(author):
+                if response:
+                    st.markdown(response, unsafe_allow_html=True)
+                if thoughts:
+                    with st.expander("Show Thoughts"):
+                        st.markdown(thoughts)
 
     user_input = st.chat_input("Input your request") or user_request
     if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
         agent = build_agent(is_agent_mode=is_agent_mode)
         runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
 
@@ -352,11 +391,23 @@ def render():
                 new_message=types.Content(role="user", parts=[types.Part(text=user_input)]),
                 run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS),
             )
-        
-        # Start the new task and iterate over the results.
+
         st.session_state.async_bridge.start_task(_make_iter)
-        for event in st.session_state.async_bridge:
-            chat_messages(event)
+        
+        with st.chat_message("assistant"):
+            thought_container = st.expander("Show Thoughts")
+
+            def stream_processor():
+                full_thoughts = ""
+                for event in st.session_state.async_bridge:
+                    _, response, thoughts = process_event(event)
+                    if response:
+                        yield response
+                    if thoughts:
+                        full_thoughts += thoughts + "\n\n"
+                        thought_container.markdown(full_thoughts)
+
+            st.write_stream(stream_processor)
 
 def main():
     st.set_page_config(page_title="remip-example", layout="wide")
