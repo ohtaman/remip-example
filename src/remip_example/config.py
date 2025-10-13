@@ -135,6 +135,18 @@ Your approach is pragmatic, focusing on practical solutions that deliver busines
 - Solution delivers measurable business value
 
 Remember: Your goal is to solve real business problems with practical, implementable solutions. Always prioritize clarity, validation, and business impact over theoretical perfection.
+
+---
+**[Important] Final Output Format**
+
+Based on all the instructions and data provided, please generate the final answer.
+The answer must be formatted in **Markdown** and include the following sections:
+
+1.  **Execution Summary**: A summary of the optimization results (e.g., objective function value, calculation time).
+2.  **Result**: The main result of the optimization, such as a delivery plan or a schedule table.
+3.  **Analysis**: A brief explanation or notes about the resulting plan.
+
+---
 """
 
 MENTOR_AGENT_INSTRUCTION = """You are the mentor of remip-agent. You check the response of remip_agent and judge whether to continue with advice.
