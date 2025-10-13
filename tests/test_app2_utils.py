@@ -1,6 +1,7 @@
+import json
 from google.adk.events.event import Event
 from google.genai.types import Content, Part, FunctionCall, FunctionResponse
-from remip_example.app2 import process_event
+from remip_example.app import process_event
 
 # Test List for process_event
 # - Test case for an event with simple text.
@@ -57,9 +58,10 @@ def test_process_event_with_tool_call():
     )
     author, response, thoughts = process_event(event)
     assert author == "assistant"
+    tool_args = json.dumps({"arg1": "value1"}, indent=2, ensure_ascii=False)
     expected_html = (
-        '<details><summary>Tool Call: my_tool</summary>'
-        '<pre>{\n  "arg1": "value1"\n}</pre></details>'
+        f'<details><summary>Tool Call: my_tool</summary>\n\n'
+        f'```json\n{tool_args}\n```\n\n</details>'
     )
     assert response == expected_html
     assert thoughts is None
@@ -83,9 +85,10 @@ def test_process_event_with_tool_response():
     )
     author, response, thoughts = process_event(event)
     assert author == "assistant"
+    tool_response = json.dumps({"result": "success"}, indent=2, ensure_ascii=False)
     expected_html = (
-        '<details><summary>Tool Response: my_tool</summary>'
-        '<pre>{\n  "result": "success"\n}</pre></details>'
+        f'<details><summary>Tool Response: my_tool</summary>\n\n'
+        f'```json\n{tool_response}\n```\n\n</details>'
     )
     assert response == expected_html
     assert thoughts is None
@@ -112,9 +115,10 @@ def test_process_event_complex():
     author, response, thoughts = process_event(event)
     assert author == "assistant"
     expected_thoughts = "Thinking about what to do... Okay, I will use a tool."
+    tool_args = json.dumps({"param": "value"}, indent=2, ensure_ascii=False)
     expected_response_html = (
-        '<details><summary>Tool Call: complex_tool</summary>'
-        '<pre>{\n  "param": "value"\n}</pre></details>'
+        f'<details><summary>Tool Call: complex_tool</summary>\n\n'
+        f'```json\n{tool_args}\n```\n\n</details>'
         'Here is the result.'
     )
     assert thoughts == expected_thoughts
@@ -136,18 +140,38 @@ def test_process_event_with_empty_content():
     assert thoughts is None
 
 
+def test_process_event_with_none_content():
+        """Test case for an event with None content."""
+        event = Event(
+            author="assistant",
+            content=None,
+        )
+        author, response, thoughts = process_event(event)
+        assert author == "assistant"
+        assert response is None
+        assert thoughts is None
+
+
 def test_process_event_with_unserializable_response():
-    """Test case for a tool response that is not JSON serializable."""
-    # Mock object to simulate the non-serializable CallToolResult
-    class CallToolResult:
-        def __init__(self, data):
-            self.data = data
+    """Test case for a tool response that is not JSON serializable but contains parsable JSON."""
+    # Mock objects to simulate the nested, non-serializable structure
+    class MockTextContent:
+        def __init__(self, text):
+            self.text = text
+
+    class MockCallToolResult:
+        def __init__(self, content):
+            self.content = content
         def __str__(self):
-            return f"CallToolResult(data={self.data})"
+            return f"MockCallToolResult(content={self.content})"
         def __repr__(self):
             return self.__str__()
 
-    tool_result = CallToolResult({"status": "success"})
+    summary_data = {"summary": {"status": "optimal", "objective_value": 139}}
+    summary_json_str = json.dumps(summary_data)
+    
+    text_content = MockTextContent(text=summary_json_str)
+    tool_result = MockCallToolResult(content=[text_content])
 
     event = Event(
         author="tool",
@@ -165,21 +189,12 @@ def test_process_event_with_unserializable_response():
     )
     author, response, thoughts = process_event(event)
     assert author == "tool"
+    
+    # The expected output is the beautifully formatted JSON extracted from the mock object
+    pretty_json = json.dumps(summary_data, indent=2, ensure_ascii=False)
     expected_html = (
-        '<details><summary>Tool Response: my_tool</summary>'
-        f'<pre>{str({"result": tool_result})}</pre></details>'
+        f'<details><summary>Tool Response: my_tool</summary>\n\n'
+        f'```json\n{pretty_json}\n```\n\n</details>'
     )
     assert response == expected_html
     assert thoughts is None
-    
-    
-def test_process_event_with_none_content():
-        """Test case for an event with None content."""
-        event = Event(
-            author="assistant",
-            content=None,
-        )
-        author, response, thoughts = process_event(event)
-        assert author == "assistant"
-        assert response is None
-        assert thoughts is None

@@ -229,21 +229,45 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
             thoughts_markdown += part.text
         elif part.function_call:
             tool_name = part.function_call.name
-            tool_args = json.dumps(part.function_call.args, indent=2)
+            tool_args = json.dumps(part.function_call.args, indent=2, ensure_ascii=False)
             response_markdown += (
-                f'<details><summary>Tool Call: {tool_name}</summary>'
-                f'<pre>{tool_args}</pre></details>'
+                f'<details><summary>Tool Call: {tool_name}</summary>\n\n'
+                f'```json\n{tool_args}\n```\n\n</details>'
             )
         elif part.function_response:
             tool_name = part.function_response.name
             try:
-                tool_response = json.dumps(part.function_response.response, indent=2)
+                tool_response = json.dumps(part.function_response.response, indent=2, ensure_ascii=False)
+                response_markdown += (
+                    f'<details><summary>Tool Response: {tool_name}</summary>\n\n'
+                    f'```json\n{tool_response}\n```\n\n</details>'
+                )
             except TypeError:
-                tool_response = str(part.function_response.response)
-            response_markdown += (
-                f'<details><summary>Tool Response: {tool_name}</summary>'
-                f'<pre>{tool_response}</pre></details>'
-            )
+                # Fallback for non-serializable objects like CallToolResult
+                raw_response = part.function_response.response
+                extracted_json = None
+                if isinstance(raw_response, dict) and 'result' in raw_response:
+                    result_obj = raw_response['result']
+                    if hasattr(result_obj, 'content') and result_obj.content and hasattr(result_obj.content[0], 'text'):
+                        try:
+                            # Extract and format the nested JSON string
+                            parsed_text = json.loads(result_obj.content[0].text)
+                            extracted_json = json.dumps(parsed_text, indent=2, ensure_ascii=False)
+                        except (json.JSONDecodeError, IndexError):
+                            pass  # Not a valid JSON string, proceed to str() fallback
+                
+                if extracted_json:
+                    tool_response_str = extracted_json
+                    lang = "json"
+                else:
+                    # The ultimate fallback
+                    tool_response_str = str(raw_response)
+                    lang = ""
+
+                response_markdown += (
+                    f'<details><summary>Tool Response: {tool_name}</summary>\n\n'
+                    f'```{lang}\n{tool_response_str}\n```\n\n</details>'
+                )
         elif part.text:
             response_markdown += part.text
         
@@ -398,19 +422,21 @@ def render():
         st.session_state.async_bridge.start_task(_make_iter)
         
         with st.chat_message("assistant"):
-            thought_container = st.expander("Show Thoughts")
+            response_placeholder = st.empty()
+            thought_placeholder = st.empty()
+            full_response = ""
+            full_thoughts = ""
 
-            def stream_processor():
-                full_thoughts = ""
-                for event in st.session_state.async_bridge:
-                    _, response, thoughts = process_event(event)
-                    if response:
-                        yield response
-                    if thoughts:
-                        full_thoughts += thoughts + "\n\n"
-                        thought_container.markdown(full_thoughts)
-
-            st.write_stream(stream_processor)
+            for event in st.session_state.async_bridge:
+                _, response, thoughts = process_event(event)
+                if response:
+                    full_response += response
+                    response_placeholder.markdown(full_response, unsafe_allow_html=True)
+                if thoughts:
+                    full_thoughts += thoughts + "\n\n"
+                    with thought_placeholder.container():
+                        with st.expander("Show Thoughts"):
+                            st.markdown(full_thoughts)
 
 def main():
     st.set_page_config(page_title="remip-example", layout="wide")
