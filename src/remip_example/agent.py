@@ -30,7 +30,7 @@ def build_agent(
         return exit_loop(tool_context)
 
     remip_agent = Agent(
-        name="remip",
+        name="remip-agent",
         model=REMIP_AGENT_MODEL,
         description="Agent for mathematical optimization",
         instruction=REMIP_AGENT_INSTRUCTION,
@@ -48,8 +48,8 @@ def build_agent(
         return remip_agent
 
     mentor_agent = Agent(
-        name="judge",
-        model="gemini-1.5-flash-latest",
+        name="mentor-agent",
+        model="gemini-2.5-flash-latest",
         description="Agent to judge whether to continue",
         instruction=MENTOR_AGENT_INSTRUCTION,
         planner=BuiltInPlanner(
@@ -59,7 +59,7 @@ def build_agent(
             )
         ),
         tools=[exit_loop, ask],
-        output_key="judge_result",
+        output_key="mentor_result",
     )
 
     agent = LoopAgent(

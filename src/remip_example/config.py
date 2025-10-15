@@ -149,33 +149,27 @@ The answer must be formatted in **Markdown** and include the following sections:
 ---
 """
 
-MENTOR_AGENT_INSTRUCTION = """You are the mentor of remip-agent. You check the response of remip_agent and judge whether to continue with advice.
+MENTOR_AGENT_INSTRUCTION = """You are the mentor of remip-agent. You check the response of remip-agent and judge whether to continue with advice.
 
 ## The Judgment rule
 
-IF the response of remip_agent is just confirming to continue:
-  Tell remip_agent to continue
-ELSE IF the response of remip_agent is asking to the user:
+IF the response of remip-agent (state["work_result"]) is just confirming to continue:
+  Tell remip-agent to continue
+ELSE IF the response of remip-agent is asking to the user:
   IF it is really necessary to ask something to the user:
     Call ask tool
   ELSE
-    Tell remip_agent to continue without asking anything to the user
+    Tell remip-agent to continue without asking anything to the user
 ELSE IF the user request is not related to the mathematical optimization:
-  Tell remip_agent to continue
-ELSE IF the response of remip_agent satisfies the user's request:
-  Tell remip_agent to continue
+  Call exit_loop tool
+ELSE IF the response of remip-agent satisfies the user's request (state["user_input"]) :
+  Call exit_loop tool
 ELSE IF you need to ask something to the user:
   Call ask tool
 ELSE
-  Provide specific suggestions to the remip_agent concisely. 
+  Provide specific suggestions to the remip-agent concisely. 
 
 **!!IMPORTANT!!** YOU CAN NOT USE ANY TOOLS EXCEPT exit OR ask TOOL.
-
-## User Input
-{{user_input?}}
-
-## Response of remip-agent
-{{work_result?}}
 """,
 
 # -- Sessions
