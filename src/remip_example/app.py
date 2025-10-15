@@ -10,7 +10,7 @@ import os
 import queue
 import threading
 import uuid
-from typing import Any, AsyncIterator, Awaitable, Callable, Generator, Iterable
+from typing import Any, AsyncIterator, Awaitable, Callable, Generator
 
 import asyncio
 import streamlit as st
@@ -62,22 +62,38 @@ class AsyncIteratorBridge:
         while True:
             try:
                 command, data = self._command_q.get_nowait()
-                if agent_task:
-                    agent_task.cancel()
-                    try:
-                        await agent_task
-                    except (asyncio.CancelledError, StopAsyncIteration):
-                        pass  # Expected cancellation
-                
+
                 if command == 'START':
+                    if agent_task:
+                        agent_task.cancel()
+                        try:
+                            await agent_task
+                        except (asyncio.CancelledError, StopAsyncIteration):
+                            pass  # Expected cancellation
+
+                    # Clear the queue before starting a new task
+                    while not self.q.empty():
+                        self.q.get_nowait()
+                    
                     factory = data
                     agent_task = asyncio.create_task(self._run_agent_task(factory))
+
                 elif command == 'STOP':
+                    if agent_task:
+                        agent_task.cancel()
+                        try:
+                            await agent_task
+                        except (asyncio.CancelledError, StopAsyncIteration):
+                            pass  # Expected cancellation
+                        agent_task = None
+                    
                     while not self.q.empty():
                         self.q.get_nowait()
                     self.q.put(self.SENTINEL)
-                    agent_task = None
+
                 elif command == 'TERMINATE':
+                    if agent_task:
+                        agent_task.cancel()
                     break
             except queue.Empty:
                 await asyncio.sleep(0.01)
@@ -98,8 +114,6 @@ class AsyncIteratorBridge:
 
     def start_task(self, factory: Callable[[], Awaitable[AsyncIterator[Any]]]):
         """Public method for the UI thread to start a new agent task."""
-        while not self.q.empty():
-            self.q.get_nowait()
         self._command_q.put(('START', factory))
 
     def stop_task(self):
@@ -238,8 +252,6 @@ def render():
     """
     Main rendering function for the Streamlit application.
     """
-    st.title(APP_NAME)
-
     with st.sidebar:
         language, is_agent_mode = settings_form()
         examples = load_examples(language)
@@ -258,14 +270,19 @@ def render():
                 session_id=str(uuid.uuid4()),
                 state={"user_request": user_request}
             )
+            st.rerun()
         else:
             st.stop()
-    else:
-        user_request = talk_session.state.get("user_request")
+
+    user_request = talk_session.state.get("user_request")
+
+    # Display the initial user request.
+    with st.container(height=280):
+        st.markdown(user_request)
 
     # Display historical events, grouped by author.
-    grouped_history = group_events(talk_session.events)
-    for author, response, thoughts in grouped_history:
+    # Skip the first event which is the user request.
+    for author, response, thoughts in group_events(talk_session.events[1:]):
         with st.chat_message(author):
             if response:
                 st.markdown(response, unsafe_allow_html=True)
@@ -273,16 +290,14 @@ def render():
                 with st.expander("Show Thoughts"):
                     st.markdown(thoughts)
 
-    user_input = st.chat_input("Input your request") or user_request
+    user_input = st.chat_input("Input your request")
     if user_input:
-        if user_input == user_request:
-            # Avoid re-running the initial request from the form
-            if len(talk_session.events) > 1:
-                st.stop()
-        
         with st.chat_message("user"):
             st.markdown(user_input)
+    elif len(talk_session.events) == 0:
+        user_input = user_request
 
+    if user_input:
         agent = build_agent(is_agent_mode=is_agent_mode)
         runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
 
@@ -295,7 +310,7 @@ def render():
             )
 
         st.session_state.async_bridge.start_task(_make_iter)
-        
+
         # Live stream the agent's response, grouping messages on the fly.
         last_author = None
         full_response = ""
@@ -319,13 +334,13 @@ def render():
             if response and message_placeholder:
                 full_response += response
                 message_placeholder.markdown(full_response, unsafe_allow_html=True)
-            
+
             if thoughts and thought_placeholder:
                 full_thoughts += thoughts + "\n\n"
                 with thought_placeholder.container():
                     with st.expander("Show Thoughts"):
                         st.markdown(full_thoughts)
-        
+
         st.rerun()
 
 
