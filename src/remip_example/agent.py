@@ -30,7 +30,7 @@ def build_agent(
         return exit_loop(tool_context)
 
     remip_agent = Agent(
-        name="remip-agent",
+        name="remip_agent",
         model=REMIP_AGENT_MODEL,
         description="Agent for mathematical optimization",
         instruction=REMIP_AGENT_INSTRUCTION,
@@ -48,7 +48,7 @@ def build_agent(
         return remip_agent
 
     mentor_agent = Agent(
-        name="mentor-agent",
+        name="mentor_agent",
         model="gemini-2.5-flash-latest",
         description="Agent to judge whether to continue",
         instruction=MENTOR_AGENT_INSTRUCTION,
