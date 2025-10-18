@@ -1,7 +1,8 @@
 import json
+from unittest.mock import MagicMock, patch
 from google.adk.events.event import Event
 from google.genai.types import Content, Part, FunctionCall, FunctionResponse
-from remip_example.app import process_event
+from remip_example.app import process_event, group_events, initialize_session
 
 # Test List for process_event
 # - Test case for an event with simple text.
@@ -198,3 +199,90 @@ def test_process_event_with_unserializable_response():
     )
     assert response == expected_html
     assert thoughts is None
+
+# Test List for group_events
+# - Test grouping of multiple events from the same author.
+# - Test grouping of events from different authors.
+# - Test with an empty list of events.
+# - Test with events that have no author.
+
+def test_group_events_same_author():
+    """Test grouping of multiple events from the same author."""
+    events = [
+        Event(author="assistant", content=Content(parts=[Part(text="Hello.")])),
+        Event(author="assistant", content=Content(parts=[Part(text=" How are you?")])),
+    ]
+    grouped = group_events(events)
+    assert len(grouped) == 1
+    assert grouped[0][0] == "assistant"
+    assert grouped[0][1] == "Hello. How are you?"
+
+def test_group_events_different_authors():
+    """Test grouping of events from different authors."""
+    events = [
+        Event(author="user", content=Content(parts=[Part(text="Hi")])),
+        Event(author="assistant", content=Content(parts=[Part(text="Hello.")])),
+        Event(author="assistant", content=Content(parts=[Part(text=" How can I help?")])),
+    ]
+    grouped = group_events(events)
+    assert len(grouped) == 2
+    assert grouped[0][0] == "user"
+    assert grouped[0][1] == "Hi"
+    assert grouped[1][0] == "assistant"
+    assert grouped[1][1] == "Hello. How can I help?"
+
+def test_group_events_empty_list():
+    """Test with an empty list of events."""
+    assert group_events([]) == []
+
+def test_group_events_no_author():
+    """Test with events that have no author."""
+    events = [
+        Event(author="", content=Content(parts=[Part(text="Message 1")])),
+        Event(author="assistant", content=Content(parts=[Part(text="Message 2")])),
+    ]
+    grouped = group_events(events)
+    assert len(grouped) == 2
+    assert grouped[0][0] == "unknown"
+    assert grouped[0][1] == "Message 1"
+    assert grouped[1][0] == "assistant"
+    assert grouped[1][1] == "Message 2"
+
+# Test List for initialize_session
+# - Test that api_key and user_id are initialized in session_state.
+# - Test that api_key is read from environment variables if available.
+# - Test that api_key_dialog is called if api_key is not in env.
+
+@patch("remip_example.app.os.environ.get")
+@patch("remip_example.app.api_key_dialog")
+def test_initialize_session(mock_api_key_dialog, mock_os_get):
+    """Test that api_key and user_id are initialized in session_state."""
+    mock_os_get.return_value = "test_api_key"
+    
+    with patch("remip_example.app.st") as mock_st:
+        # Simulate an empty session state that allows attribute setting
+        mock_st.session_state = MagicMock(spec=dict)
+        mock_st.session_state.__contains__.side_effect = lambda item: item in mock_st.session_state.__dict__
+
+        initialize_session()
+
+        assert mock_st.session_state.api_key == "test_api_key"
+        assert hasattr(mock_st.session_state, "user_id")
+        assert hasattr(mock_st.session_state, "async_bridge")
+        mock_api_key_dialog.assert_not_called()
+
+@patch("remip_example.app.os.environ.get")
+@patch("remip_example.app.api_key_dialog")
+def test_initialize_session_calls_dialog(mock_api_key_dialog, mock_os_get):
+    """Test that api_key_dialog is called if api_key is not in env."""
+    mock_os_get.return_value = None
+    mock_api_key_dialog.return_value = "dialog_api_key"
+
+    with patch("remip_example.app.st") as mock_st:
+        mock_st.session_state = MagicMock(spec=dict)
+        mock_st.session_state.__contains__.side_effect = lambda item: item in mock_st.session_state.__dict__
+        
+        initialize_session()
+
+        assert mock_st.session_state.api_key == "dialog_api_key"
+        mock_api_key_dialog.assert_called_once()
