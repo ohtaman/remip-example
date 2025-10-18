@@ -35,6 +35,11 @@ from remip_example.ui_components import (
     settings_form,
 )
 
+AVATARS = {
+    "remip_agent": "🦸",
+    "mentor_agent": "🧚",
+    "user": ""
+}
 
 class AsyncIteratorBridge:
     """
@@ -45,6 +50,7 @@ class AsyncIteratorBridge:
         self.SENTINEL = object()
         self.q = queue.Queue()
         self._command_q = queue.Queue()
+        self.current_generator = None
         self.thread = threading.Thread(target=self._runner, daemon=True)
         self.thread.start()
 
@@ -65,6 +71,9 @@ class AsyncIteratorBridge:
 
                 if command == 'START':
                     if agent_task:
+                        if self.current_generator is not None:
+                            print(self.current_generator)
+                            await self.current_generator.aclose()
                         agent_task.cancel()
                         try:
                             await agent_task
@@ -102,6 +111,7 @@ class AsyncIteratorBridge:
         """Runs the agent's async iterator and puts results on the response queue."""
         try:
             async_iterable = await factory()
+            self.current_generator = async_iterable
             async for item in async_iterable:
                 self.q.put(item)
         except (asyncio.CancelledError, StopAsyncIteration):
@@ -184,7 +194,7 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
                 else:
                     # The ultimate fallback: convert the object to a plain string.
                     tool_response = str(raw_response)
-                    lang = ""
+                    lang = "python"
             
             response_markdown += (
                 f'<details><summary>Tool Response: {tool_name}</summary>\n\n'
@@ -248,6 +258,16 @@ def initialize_session():
         st.session_state.async_bridge = AsyncIteratorBridge()
 
 
+def _display_message_content(response: str | None, thoughts: str | None) -> None:
+    """Renders the content of a chat message, including response and thoughts."""
+    if response:
+        st.markdown(response, unsafe_allow_html=True)
+    if thoughts:
+        with st.expander("Show Thoughts"):
+            st.markdown(thoughts)
+
+
+
 def render():
     """
     Main rendering function for the Streamlit application.
@@ -258,6 +278,8 @@ def render():
         example_title = st.selectbox("Example Prompt", ["" ] + list(examples.keys()))
         example = examples.get(example_title, "")
         if st.button("New Session", use_container_width=True):
+            if "async_bridge" in st.session_state:
+                del st.session_state.async_bridge
             clear_talk_session()
             st.rerun()
     
@@ -283,22 +305,20 @@ def render():
     # Display historical events, grouped by author.
     # Skip the first event which is the user request.
     for author, response, thoughts in group_events(talk_session.events[1:]):
-        with st.chat_message(author):
-            if response:
-                st.markdown(response, unsafe_allow_html=True)
-            if thoughts:
-                with st.expander("Show Thoughts"):
-                    st.markdown(thoughts)
+        with st.chat_message(author, avatar=AVATARS.get(author)):
+            _display_message_content(response, thoughts)
 
     user_input = st.chat_input("Input your request")
     if user_input:
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar=AVATARS.get("user")):
             st.markdown(user_input)
     elif len(talk_session.events) == 0:
         user_input = user_request
 
     if user_input:
         agent = build_agent(is_agent_mode=is_agent_mode)
+        with st.sidebar:
+            st.write(agent)
         runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
 
         async def _make_iter() -> AsyncIterator[Event]:
@@ -327,9 +347,9 @@ def render():
                 last_author = author
                 full_response = ""
                 full_thoughts = ""
-                with st.chat_message(author):
-                    message_placeholder = st.empty()
+                with st.chat_message(author, avatar=AVATARS.get(author)):
                     thought_placeholder = st.empty()
+                    message_placeholder = st.empty()
 
             if response and message_placeholder:
                 full_response += response
@@ -342,6 +362,8 @@ def render():
                         st.markdown(full_thoughts)
 
         st.rerun()
+    
+    st.write(talk_session.events)
 
 
 def main():

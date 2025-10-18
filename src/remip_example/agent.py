@@ -2,10 +2,12 @@
 
 import os
 
-from google.adk.agents import Agent, LoopAgent
+from google.adk.agents import Agent, LlmAgent, LoopAgent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.planners import BuiltInPlanner
-from google.adk.tools import ToolContext, exit_loop
+from google.adk.tools import BaseTool, ToolContext, exit_loop
 from google.genai import types
+from mcp.types import CallToolResult
 
 from remip_example.config import (
     MENTOR_AGENT_INSTRUCTION,
@@ -15,9 +17,30 @@ from remip_example.config import (
 from remip_example.services import get_mcp_toolset
 
 
+def clear_tool_calling_track(callback_context: CallbackContext) -> None:
+    callback_context.state["tools_used"] = []
+
+
+def track_tool_calling(tool: BaseTool, args: dict[str, any], tool_context: ToolContext, tool_response: CallToolResult) -> None:
+    if "tools_used" not in tool_context.state:
+        tool_context.state["tools_used"] = []
+
+    truncated_args = {
+        k: str(v)[:128] + "..." if len(str(v)) > 128 else ""
+        for k, v in args.items()
+    }
+
+    tool_context.state["tools_used"].append({
+        "agent": tool_context.agent_name,
+        "tool": tool.name,
+        "args": truncated_args,
+        "success": not tool_response.isError
+    })
+
+
 def build_agent(
     is_agent_mode: bool = True,
-    max_iterations: int = 10,
+    max_iterations: int = 50,
     thinking_budget: int = 2048,
     api_key: str | None = None,
 ) -> Agent:
@@ -29,7 +52,7 @@ def build_agent(
         """Ask the user for additional information or confirmation."""
         return exit_loop(tool_context)
 
-    remip_agent = Agent(
+    remip_agent = LlmAgent(
         name="remip_agent",
         model=REMIP_AGENT_MODEL,
         description="Agent for mathematical optimization",
@@ -42,14 +65,16 @@ def build_agent(
         ),
         tools=[get_mcp_toolset()],
         output_key="work_result",
+        before_agent_callback=clear_tool_calling_track,
+        after_tool_callback=track_tool_calling
     )
 
     if not is_agent_mode:
         return remip_agent
 
-    mentor_agent = Agent(
+    mentor_agent = LlmAgent(
         name="mentor_agent",
-        model="gemini-2.5-flash-latest",
+        model=REMIP_AGENT_MODEL,
         description="Agent to judge whether to continue",
         instruction=MENTOR_AGENT_INSTRUCTION,
         planner=BuiltInPlanner(

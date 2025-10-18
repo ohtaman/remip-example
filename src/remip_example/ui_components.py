@@ -24,7 +24,7 @@ def settings_form():
     with st.form("Settings", border=False):
         with st.expander("Settings"):
             language = st.selectbox("Language", ["ja", "en"])
-            is_agent_mode = st.toggle("Agent Mode")
+            is_agent_mode = st.toggle("Agent Mode", value=True)
             st.form_submit_button("Submit", use_container_width=True)
     return language, is_agent_mode
 
