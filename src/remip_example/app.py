@@ -35,17 +35,15 @@ from remip_example.ui_components import (
     settings_form,
 )
 
-AVATARS = {
-    "remip_agent": "🦸",
-    "mentor_agent": "🧚",
-    "user": ""
-}
+AVATARS = {"remip_agent": "🦸", "mentor_agent": "🧚", "user": ""}
+
 
 class AsyncIteratorBridge:
     """
     A bridge to allow a background thread running an async generator to communicate
     with the main Streamlit thread.
     """
+
     def __init__(self):
         self.SENTINEL = object()
         self.q = queue.Queue()
@@ -69,7 +67,7 @@ class AsyncIteratorBridge:
             try:
                 command, data = self._command_q.get_nowait()
 
-                if command == 'START':
+                if command == "START":
                     if agent_task:
                         if self.current_generator is not None:
                             print(self.current_generator)
@@ -83,11 +81,11 @@ class AsyncIteratorBridge:
                     # Clear the queue before starting a new task
                     while not self.q.empty():
                         self.q.get_nowait()
-                    
+
                     factory = data
                     agent_task = asyncio.create_task(self._run_agent_task(factory))
 
-                elif command == 'STOP':
+                elif command == "STOP":
                     if agent_task:
                         agent_task.cancel()
                         try:
@@ -95,12 +93,12 @@ class AsyncIteratorBridge:
                         except (asyncio.CancelledError, StopAsyncIteration):
                             pass  # Expected cancellation
                         agent_task = None
-                    
+
                     while not self.q.empty():
                         self.q.get_nowait()
                     self.q.put(self.SENTINEL)
 
-                elif command == 'TERMINATE':
+                elif command == "TERMINATE":
                     if agent_task:
                         agent_task.cancel()
                     break
@@ -124,11 +122,11 @@ class AsyncIteratorBridge:
 
     def start_task(self, factory: Callable[[], Awaitable[AsyncIterator[Any]]]):
         """Public method for the UI thread to start a new agent task."""
-        self._command_q.put(('START', factory))
+        self._command_q.put(("START", factory))
 
     def stop_task(self):
         """Public method for the UI thread to stop the current agent task."""
-        self._command_q.put(('STOP', None))
+        self._command_q.put(("STOP", None))
 
     def __iter__(self) -> Generator[Any, Any, None]:
         """Allows the UI thread to iterate over results from the response queue."""
@@ -137,16 +135,16 @@ class AsyncIteratorBridge:
             if item is self.SENTINEL:
                 break
             yield item
-    
+
     def __del__(self):
         """Ensure the background thread is terminated when the bridge is garbage collected."""
-        self._command_q.put(('TERMINATE', None))
+        self._command_q.put(("TERMINATE", None))
 
 
 def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
     """
     Processes an agent Event and formats its content for beautiful display.
-    
+
     Returns:
         A tuple containing (author, response_markdown, thoughts_markdown).
     """
@@ -162,32 +160,42 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
             thoughts_markdown += part.text
         elif part.function_call:
             tool_name = part.function_call.name
-            tool_args = json.dumps(part.function_call.args, indent=2, ensure_ascii=False)
+            tool_args = json.dumps(
+                part.function_call.args, indent=2, ensure_ascii=False
+            )
             response_markdown += (
-                f'<details><summary>Tool Call: {tool_name}</summary>\n\n'
-                f'```json\n{tool_args}\n```\n\n</details>'
+                f"<details><summary>Tool Call: {tool_name}</summary>\n\n"
+                f"```json\n{tool_args}\n```\n\n</details>"
             )
         elif part.function_response:
             tool_name = part.function_response.name
             try:
                 # Try to serialize the response to a pretty JSON string.
-                tool_response = json.dumps(part.function_response.response, indent=2, ensure_ascii=False)
+                tool_response = json.dumps(
+                    part.function_response.response, indent=2, ensure_ascii=False
+                )
                 lang = "json"
             except TypeError:
                 # If serialization fails, check for a nested CallToolResult.
                 raw_response = part.function_response.response
                 extracted_json = None
-                if isinstance(raw_response, dict) and 'result' in raw_response:
-                    result_obj = raw_response['result']
+                if isinstance(raw_response, dict) and "result" in raw_response:
+                    result_obj = raw_response["result"]
                     # Check if it looks like a CallToolResult with nested JSON.
-                    if hasattr(result_obj, 'content') and result_obj.content and hasattr(result_obj.content[0], 'text'):
+                    if (
+                        hasattr(result_obj, "content")
+                        and result_obj.content
+                        and hasattr(result_obj.content[0], "text")
+                    ):
                         try:
                             # Extract and format the nested JSON string.
                             parsed_text = json.loads(result_obj.content[0].text)
-                            extracted_json = json.dumps(parsed_text, indent=2, ensure_ascii=False)
+                            extracted_json = json.dumps(
+                                parsed_text, indent=2, ensure_ascii=False
+                            )
                         except (json.JSONDecodeError, IndexError):
                             pass  # Not a valid JSON string, proceed to str() fallback
-                
+
                 if extracted_json:
                     tool_response = extracted_json
                     lang = "json"
@@ -195,14 +203,14 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
                     # The ultimate fallback: convert the object to a plain string.
                     tool_response = str(raw_response)
                     lang = "python"
-            
+
             response_markdown += (
-                f'<details><summary>Tool Response: {tool_name}</summary>\n\n'
-                f'```{lang}\n{tool_response}\n```\n\n</details>'
+                f"<details><summary>Tool Response: {tool_name}</summary>\n\n"
+                f"```{lang}\n{tool_response}\n```\n\n</details>"
             )
         elif part.text:
             response_markdown += part.text
-        
+
     return author, response_markdown or None, thoughts_markdown or None
 
 
@@ -235,7 +243,7 @@ def group_events(events: list[Event]) -> list[tuple[str, str, str]]:
             current_author = author
             current_response = response or ""
             current_thoughts = thoughts or ""
-    
+
     grouped.append((current_author, current_response, current_thoughts))
     return grouped
 
@@ -267,7 +275,6 @@ def _display_message_content(response: str | None, thoughts: str | None) -> None
             st.markdown(thoughts)
 
 
-
 def render():
     """
     Main rendering function for the Streamlit application.
@@ -275,14 +282,14 @@ def render():
     with st.sidebar:
         language, is_agent_mode = settings_form()
         examples = load_examples(language)
-        example_title = st.selectbox("Example Prompt", ["" ] + list(examples.keys()))
+        example_title = st.selectbox("Example Prompt", [""] + list(examples.keys()))
         example = examples.get(example_title, "")
         if st.button("New Session", use_container_width=True):
             if "async_bridge" in st.session_state:
                 del st.session_state.async_bridge
             clear_talk_session()
             st.rerun()
-    
+
     talk_session = get_talk_session()
     if talk_session is None:
         user_request = new_session_form(example)
@@ -290,7 +297,7 @@ def render():
             talk_session = create_talk_session(
                 user_id=st.session_state.user_id,
                 session_id=str(uuid.uuid4()),
-                state={"user_request": user_request}
+                state={"user_request": user_request},
             )
             st.rerun()
         else:
@@ -319,14 +326,20 @@ def render():
         agent = build_agent(is_agent_mode=is_agent_mode)
         with st.sidebar:
             st.write(agent)
-        runner = Runner(app_name=APP_NAME, agent=agent, session_service=get_session_service())
+        runner = Runner(
+            app_name=APP_NAME, agent=agent, session_service=get_session_service()
+        )
 
         async def _make_iter() -> AsyncIterator[Event]:
             return runner.run_async(
                 user_id=talk_session.user_id,
                 session_id=talk_session.id,
-                new_message=types.Content(role="user", parts=[types.Part(text=user_input)]),
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS),
+                new_message=types.Content(
+                    role="user", parts=[types.Part(text=user_input)]
+                ),
+                run_config=RunConfig(
+                    streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS
+                ),
             )
 
         st.session_state.async_bridge.start_task(_make_iter)
@@ -362,7 +375,7 @@ def render():
                         st.markdown(full_thoughts)
 
         st.rerun()
-    
+
     st.write(talk_session.events)
 
 

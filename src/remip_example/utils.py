@@ -7,12 +7,17 @@ import socket
 import time
 import subprocess
 import atexit
+import os
+import signal
 
 import streamlit as st
 
 from remip_example.config import MCP_PORT
 
-def wait_for_port(host: str, port: int, timeout: float = 10.0, interval: float = 0.1) -> bool:
+
+def wait_for_port(
+    host: str, port: int, timeout: float = 10.0, interval: float = 0.1
+) -> bool:
     """Waits for the specified host:port to start listening."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -24,8 +29,6 @@ def wait_for_port(host: str, port: int, timeout: float = 10.0, interval: float =
         time.sleep(interval)
     return False
 
-import os
-import signal
 
 # Global variable to hold the server process so we can terminate it on exit.
 _mcp_server_process: subprocess.Popen | None = None
@@ -71,6 +74,7 @@ def start_remip_mcp() -> int:
 
     wait_for_port("localhost", port)
     return port
+
 
 def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:
     base_path = pathlib.Path.cwd() / install_dir

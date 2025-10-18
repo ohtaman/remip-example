@@ -21,21 +21,27 @@ def clear_tool_calling_track(callback_context: CallbackContext) -> None:
     callback_context.state["tools_used"] = []
 
 
-def track_tool_calling(tool: BaseTool, args: dict[str, any], tool_context: ToolContext, tool_response: CallToolResult) -> None:
+def track_tool_calling(
+    tool: BaseTool,
+    args: dict[str, any],
+    tool_context: ToolContext,
+    tool_response: CallToolResult,
+) -> None:
     if "tools_used" not in tool_context.state:
         tool_context.state["tools_used"] = []
 
     truncated_args = {
-        k: str(v)[:128] + "..." if len(str(v)) > 128 else ""
-        for k, v in args.items()
+        k: str(v)[:128] + "..." if len(str(v)) > 128 else "" for k, v in args.items()
     }
 
-    tool_context.state["tools_used"].append({
-        "agent": tool_context.agent_name,
-        "tool": tool.name,
-        "args": truncated_args,
-        "success": not tool_response.isError
-    })
+    tool_context.state["tools_used"].append(
+        {
+            "agent": tool_context.agent_name,
+            "tool": tool.name,
+            "args": truncated_args,
+            "success": not tool_response.isError,
+        }
+    )
 
 
 def build_agent(
@@ -66,7 +72,7 @@ def build_agent(
         tools=[get_mcp_toolset()],
         output_key="work_result",
         before_agent_callback=clear_tool_calling_track,
-        after_tool_callback=track_tool_calling
+        after_tool_callback=track_tool_calling,
     )
 
     if not is_agent_mode:
