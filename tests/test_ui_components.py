@@ -7,6 +7,7 @@ from remip_example.ui_components import load_examples, settings_form
 # - Test that it handles an empty directory.
 # - Test that it correctly parses the title and content.
 
+
 @patch("pathlib.Path.glob")
 @patch("builtins.open", new_callable=mock_open, read_data="Title\nContent")
 def test_load_examples(mock_file, mock_glob):
@@ -16,6 +17,7 @@ def test_load_examples(mock_file, mock_glob):
     assert "Title" in examples
     assert examples["Title"] == "Title\nContent"
 
+
 @patch("pathlib.Path.glob")
 def test_load_examples_empty_dir(mock_glob):
     """Test that it handles an empty directory."""
@@ -23,8 +25,10 @@ def test_load_examples_empty_dir(mock_glob):
     examples = load_examples("en")
     assert examples == {}
 
+
 # Test List for settings_form
 # - Test that it returns the values from the streamlit widgets.
+
 
 def test_settings_form():
     """Test that it returns the values from the streamlit widgets."""
@@ -39,4 +43,3 @@ def test_settings_form():
     assert is_agent_mode is False
     mock_st.selectbox.assert_called_once_with("Language", ["ja", "en"])
     mock_st.toggle.assert_called_once_with("Agent Mode", value=True)
-

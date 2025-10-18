@@ -1,16 +1,3 @@
-import asyncio
-from unittest.mock import MagicMock, patch, AsyncMock
-
-import pytest
-from google.adk.sessions import Session
-
-from remip_example.services import (
-    get_talk_session,
-    clear_talk_session,
-    create_talk_session,
-    TalkSessionInfo,
-)
-
 # @pytest.fixture
 # def mock_streamlit_session():
 #     """Fixture to mock streamlit.session_state."""
@@ -50,7 +37,7 @@ from remip_example.services import (
 #     mock_streamlit_session.session_state.talk_session_info = TalkSessionInfo(
 #         session_id="test_session", user_id="test_user"
 #     )
-    
+
 #     get_talk_session()
 #     mock_session_service.get_session.assert_called_once_with(
 #         app_name="remip-example",
