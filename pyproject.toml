@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-remip-sample = "remip_sample:main"
+remip-example = "remip_example:main"
 
 [build-system]
 requires = ["hatchling"]
