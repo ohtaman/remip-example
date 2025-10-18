@@ -83,7 +83,7 @@ def build_agent(
                 thinking_budget=1024,
             )
         ),
-        tools=[exit_loop, ask],
+        tools=[exit_loop, ask, get_mcp_toolset()],
         output_key="mentor_result",
     )
 
