@@ -486,7 +486,7 @@ font = "sans serif"
 # headingFontSizes = "2.75rem"
 # 
 # Font sizes can be specified in pixels or rem, but rem is recommended.
-# headingFontSizes =
+# headingFontSizes = 
 
 # One or more font weights for h1-h6 headings.
 # 

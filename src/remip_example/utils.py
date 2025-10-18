@@ -26,7 +26,6 @@ def wait_for_port(host: str, port: int, timeout: float = 10.0, interval: float =
 
 import os
 import signal
-# ... (other imports)
 
 # Global variable to hold the server process so we can terminate it on exit.
 _mcp_server_process: subprocess.Popen | None = None
@@ -46,7 +45,6 @@ def _cleanup_mcp_server_group():
             _mcp_server_process.wait(timeout=5)
             print("ReMIP server process group terminated.")
         except (ProcessLookupError, PermissionError):
-            # Process might have already died, which is fine.
             pass
         except subprocess.TimeoutExpired:
             print("Process group did not terminate gracefully. Forcing kill.")
@@ -61,9 +59,6 @@ def start_remip_mcp() -> int:
     This ensures the server and any of its children can be terminated together.
     """
     port = MCP_PORT
-    # start_new_session=True creates a new process group. This is crucial
-    # for ensuring that the main process, the npx shell, and the actual
-    # solver processes can all be terminated together.
     proc = subprocess.Popen(
         f"npx -y github:ohtaman/remip-mcp --http --start-remip-server --port {port}",
         shell=True,
@@ -72,7 +67,6 @@ def start_remip_mcp() -> int:
 
     global _mcp_server_process
     _mcp_server_process = proc
-    # Register the group cleanup function to be called on exit.
     atexit.register(_cleanup_mcp_server_group)
 
     wait_for_port("localhost", port)
