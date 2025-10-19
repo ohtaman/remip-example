@@ -20,7 +20,6 @@ class TalkSessionInfo:
     session_id: str
     user_id: str
     user_request: str | None = None
-    agent_mode: bool | None = None
     agent: Agent | None = None
 
 

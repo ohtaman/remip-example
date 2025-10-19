@@ -2,7 +2,6 @@
 
 # --- Application Constants ---
 APP_NAME = "remip"
-DEFAULT_MAX_ITERS = 100
 NORMAL_MAX_CALLS = 100
 
 EXAMPLES_DIR = "examples"
