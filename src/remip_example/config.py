@@ -280,7 +280,7 @@ When you receive the response from `remip_agent`, check its behavior and decide 
   → Tell `"continue"` to the `remip_agent` (without involving the user)
 
 ### 4. Tool Usage Check
-- **IF no tools are called** →
+- **IF no tools are called even if `remip_agent` says it used them** →
   → Reply to `remip_agent`: `"Ensure to use tools and continue"`
 
 ### 5. Satisfaction Check
