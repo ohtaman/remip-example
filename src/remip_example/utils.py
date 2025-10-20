@@ -1,16 +1,20 @@
 """Utility functions for the remip-sample application."""
 
-import tarfile
-import urllib.request
-import pathlib
-import socket
-import time
-import subprocess
 import atexit
 import os
+import pathlib
 import signal
+import socket
+import subprocess
+import tarfile
+import time
+import urllib.request
 
 import streamlit as st
+from google.adk.tools.mcp_tool.mcp_session_manager import (
+    StreamableHTTPConnectionParams,
+)
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
 from remip_example.config import MCP_PORT
 
@@ -74,6 +78,18 @@ def start_remip_mcp() -> int:
 
     wait_for_port("localhost", port)
     return port
+
+
+def get_mcp_toolset() -> McpToolset:
+    """Starts the MCP server and returns a cached toolset instance."""
+    port = start_remip_mcp()
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=f"http://localhost:{port}/mcp/",
+            timeout=30,
+            terminate_on_close=True,
+        ),
+    )
 
 
 def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:

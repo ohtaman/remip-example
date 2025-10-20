@@ -14,7 +14,7 @@ from remip_example.config import (
     REMIP_AGENT_INSTRUCTION,
     REMIP_AGENT_MODEL,
 )
-from remip_example.services import get_mcp_toolset
+from remip_example.utils import get_mcp_toolset
 
 
 def clear_tool_calling_track(callback_context: CallbackContext) -> None:
