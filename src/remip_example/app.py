@@ -1,7 +1,6 @@
 """The main Streamlit application for the remip-example."""
 
 import json
-import time
 import uuid
 
 from pydantic import Json, TypeAdapter
@@ -15,7 +14,7 @@ from remip_example.services import AgentService
 
 
 def get_agent_service() -> AgentService:
-    """Gets the AgentService instance for the current session."""
+    """Gets the AgentService instance for the current streamlit session."""
     if "agent_service" not in st.session_state:
         st.session_state.agent_service = AgentService()
     return st.session_state.agent_service
@@ -73,13 +72,11 @@ def main():
                 user_id=user_id, session_id=selected_session_id, message_content=prompt
             )
 
+        if agent_service.is_task_running(selected_session_id):
             for event in agent_service.stream_new_responses(selected_session_id):
                 author, text_chunk, _ = process_event(event)
                 with st.chat_message(author):
                     st.markdown(text_chunk, unsafe_allow_html=True)
-        else:
-            time.sleep(2)
-            st.rerun()
 
     else:
         st.info("Select a talk from the sidebar or create a new one.")

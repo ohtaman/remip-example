@@ -34,6 +34,8 @@ class AgentService:
         self._command_q = queue.Queue()
         self._output_queues: dict[str, queue.Queue] = {}
         self._active_tasks: dict[str, asyncio.Task] = {}
+        self._task_status_lock = threading.Lock()
+        self._task_is_running: dict[str, bool] = {}
 
         self.session_service = InMemorySessionService()
 
@@ -78,6 +80,8 @@ class AgentService:
                 new_message=user_content, session_id=session_id, user_id=user_id
             )
 
+        with self._task_status_lock:
+            self._task_is_running[session_id] = True
         self._command_q.put(("START", session_id, _make_iter))
 
     def get_historical_messages(self, user_id: str, session_id: str) -> list[Event]:
@@ -91,6 +95,11 @@ class AgentService:
             return adk_session.events
         else:
             return []
+
+    def is_task_running(self, session_id: str) -> bool:
+        """Checks if a task is currently running for the given session."""
+        with self._task_status_lock:
+            return self._task_is_running.get(session_id, False)
 
     def stream_new_responses(self, session_id: str) -> Generator[Any, None, None]:
         """Yields new response events for a session. THIS IS A BLOCKING GENERATOR."""
@@ -152,7 +161,7 @@ class AgentService:
                             break
 
                     self._active_tasks[session_id] = asyncio.create_task(
-                        self._run_agent_task(factory, response_q)
+                        self._run_agent_task(factory, response_q, session_id)
                     )
                 elif command == "TERMINATE":
                     break
@@ -160,24 +169,22 @@ class AgentService:
             except queue.Empty:
                 await asyncio.sleep(0.01)
 
-    async def _run_agent_task(self, factory, response_q):
+    async def _run_agent_task(self, factory, response_q, session_id):
         """Runs the agent's async iterator and puts results on the response queue."""
         task_name = asyncio.current_task().get_name()
-        print(f"TASK [{task_name}]: Starting.")
+        print(f"TASK [{task_name}]: Starting for session {session_id}.")
         try:
             async_iterable = await factory()
             async for item in async_iterable:
                 response_q.put(item)
         except (asyncio.CancelledError, StopAsyncIteration):
-            # This occurs when the task is cancelled, so we do nothing.
-            print(f"TASK [{task_name}]: Cancelled.")
-            pass
+            print(
+                f"TASK [{task_name}]: Cancelled or finished for session {session_id}."
+            )
         except Exception as e:
-            # In a real app, log this error
-            print(f"TASK [{task_name}]: Errored: {e}")
-            # Optionally, put a sentinel or an error object on the queue
-            response_q.put(self.SENTINEL)
-        else:
-            # This runs only if the loop completes without any exceptions.
-            print(f"TASK [{task_name}]: Finished normally. Sending SENTINEL.")
+            print(f"TASK [{task_name}]: Errored for session {session_id}: {e}")
+        finally:
+            print(f"TASK [{task_name}]: Cleaning up for session {session_id}.")
+            with self._task_status_lock:
+                self._task_is_running[session_id] = False
             response_q.put(self.SENTINEL)
