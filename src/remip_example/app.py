@@ -1,22 +1,24 @@
 """The main Streamlit application for the remip-example."""
 
-import os
-import sys
+import json
 import time
 import uuid
 
+from pydantic import Json, TypeAdapter
 import streamlit as st
-
-# Add the project root to the Python path to ensure modules are found
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from google.adk.events.event import Event
 
 from remip_example.services import AgentService
 
 
-@st.cache_resource
+# --- Streamlit App ---
+
+
 def get_agent_service() -> AgentService:
-    """Creates and returns a singleton instance of the AgentService."""
-    return AgentService()
+    """Gets the AgentService instance for the current session."""
+    if "agent_service" not in st.session_state:
+        st.session_state.agent_service = AgentService()
+    return st.session_state.agent_service
 
 
 def main():
@@ -44,7 +46,7 @@ def main():
         st.rerun()
 
     st.sidebar.write("--- Existing Talks ---")
-    session_ids = agent_service.list_sessions(user_id=user_id)
+    session_ids = agent_service.list_talk_sessions(user_id=user_id)
     for session_id in session_ids:
         label = f"Session {session_id[:8]}..."
         if st.sidebar.button(label, key=f"session_btn_{session_id}"):
@@ -56,27 +58,59 @@ def main():
         selected_session_id = st.session_state.selected_session_id
         st.header(f"Session: {selected_session_id}")
 
-        messages = agent_service.get_messages(
+        for event in agent_service.get_historical_messages(
             user_id=user_id, session_id=selected_session_id
-        )
-        for msg in messages:
-            with st.chat_message(msg.sender):
-                st.markdown(msg.content)
+        ):
+            author, text_chunk, _ = process_event(event)
+            with st.chat_message(author):
+                st.markdown(text_chunk, unsafe_allow_html=True)
 
         if prompt := st.chat_input("What is up?"):
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
             agent_service.add_message(
                 user_id=user_id, session_id=selected_session_id, message_content=prompt
             )
-            st.rerun()
 
-        # --- Step 2.4: Streaming Responses (Polling) ---
-        # If the last message is from the user, poll for the agent's response.
-        if len(messages) > 0 and messages[-1].sender == "user":
-            time.sleep(0.5)  # Wait half a second before checking for a response
+            for event in agent_service.stream_new_responses(selected_session_id):
+                author, text_chunk, _ = process_event(event)
+                with st.chat_message(author):
+                    st.markdown(text_chunk, unsafe_allow_html=True)
+        else:
+            time.sleep(2)
             st.rerun()
 
     else:
         st.info("Select a talk from the sidebar or create a new one.")
+
+
+def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
+    """Processes an agent Event and formats its content for display."""
+    author = event.author
+    if not event.content:
+        return author, None, None
+
+    response_md, thoughts_md = "", ""
+    for part in event.content.parts:
+        if part.thought:
+            thoughts_md += part.text
+        elif part.function_call:
+            args = json.dumps(part.function_call.args, indent=2, ensure_ascii=False)
+            response_md += f"\n\n<details>\n<summary>\nTool Call: {part.function_call.name}\n</summary>\n\n```json\n{args}\n```\n\n</details>\n\n"
+        elif part.function_response:
+            response_adapter = TypeAdapter(Json)
+            try:
+                response = response_adapter.validate_python(
+                    part.function_response.response
+                )
+                response_str = json.dumps(response, indent=2)
+            except Exception:
+                response_str = str(part.function_response.response)
+            response_md += f"\n\n<details>\n<summary>\nTool Response: {part.function_response.name}\n</summary>\n\n```json\n{response_str}\n```\n\n</details>\n\n"
+        elif part.text:
+            response_md += part.text
+    return author, response_md or None, thoughts_md or None
 
 
 if __name__ == "__main__":

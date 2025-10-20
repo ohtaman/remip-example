@@ -267,24 +267,24 @@ Therefore:
 
 When you receive the response from `remip_agent`, check its behavior and decide what to do:
 
-### 1. Tool Usage Check
-- **IF no tools are called** →
-  → Reply to `remip_agent`: `"Ensure to use tools and continue"`
-
-### 2. Satisfaction Check
-- **IF the response satisfies the user’s request clearly** →
+### 1. Topic Relevance
+- **IF the user request is unrelated to business planning or decision-making problems (e.g., chatting or general questions)** →
   → Call `exit_loop` tool
 
-### 3. Clarification Check
+### 2. Clarification Check
 - **IF the user request is ambiguous or requires more information** →
   → Call `ask` tool
 
-### 4. Continuation Confirmation
+### 3. Continuation Confirmation
 - **IF the `remip_agent` explicitly asks whether to continue** →
   → Tell `"continue"` to the `remip_agent` (without involving the user)
 
-### 5. Topic Relevance
-- **IF the user request is unrelated to business planning or decision-making problems (e.g., chatting or general questions)** →
+### 4. Tool Usage Check
+- **IF no tools are called** →
+  → Reply to `remip_agent`: `"Ensure to use tools and continue"`
+
+### 5. Satisfaction Check
+- **IF the response satisfies the user’s request clearly** →
   → Call `exit_loop` tool
 
 ### 6. Improvement Feedback
