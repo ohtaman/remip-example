@@ -7,13 +7,15 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Generator
 
+from google.adk.agents import RunConfig
+from google.adk.agents.run_config import StreamingMode
 from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 
 from remip_example.agent import build_agent
-from remip_example.config import APP_NAME
+from remip_example.config import APP_NAME, NORMAL_MAX_CALLS
 
 
 @dataclass
@@ -138,17 +140,13 @@ class AgentService:
 
     def _runner(self):
         """The main entry point for the background thread."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self._producer_loop())
-        finally:
-            loop.close()
+        asyncio.run(self._producer_loop())
 
     async def _producer_loop(self):
         """The core async event loop for the background thread."""
         while self._is_running:
             try:
+                #                 command, session_id, data = self._command_q.get()
                 command, session_id, data = self._command_q.get_nowait()
                 print(f"PRODUCER: Got command '{command}' for session {session_id}")
 
@@ -233,7 +231,12 @@ class AgentService:
                     f"SESSION TASK [{task_name}]: Running agent for message in session {session_id}."
                 )
                 async_iterable = runner.run_async(
-                    new_message=user_content, session_id=session_id, user_id=user_id
+                    new_message=user_content,
+                    session_id=session_id,
+                    user_id=user_id,
+                    run_config=RunConfig(
+                        streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS
+                    ),
                 )
                 print(
                     f"SESSION TASK [{task_name}]: Agent run_async started for session {session_id}."
@@ -247,6 +250,7 @@ class AgentService:
                     if session_message_queue.empty():
                         response_q.put(item)
                     else:
+                        print("SESSION TASK [{task_name}]: new message recieved.")
                         break
                     print(
                         f"SESSION TASK [{task_name}]: Put item to response_q for session {session_id}."
