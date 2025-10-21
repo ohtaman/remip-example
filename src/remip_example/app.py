@@ -11,7 +11,7 @@ from google.adk.events.event import Event
 from remip_example.services import AgentService
 
 
-# --- Streamlit App ---
+AVATARS = {"remip_agent": "🦸", "mentor_agent": "🧚", "user": None}
 
 
 def get_agent_service() -> AgentService:
@@ -80,7 +80,7 @@ def main():
 
     for event in generate_events():
         author, text_chunk, _ = process_event(event)
-        with st.chat_message(author):
+        with st.chat_message(author, avatar=AVATARS.get(author)):
             st.markdown(text_chunk, unsafe_allow_html=True)
 
 
@@ -93,7 +93,7 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
     response_md, thoughts_md = "", ""
     for part in event.content.parts:
         if part.thought:
-            thoughts_md += part.text
+            thoughts_md += part.text or ""
         elif part.function_call:
             args = json.dumps(part.function_call.args, indent=2, ensure_ascii=False)
             response_md += f"\n\n<details>\n<summary>\nTool Call: {part.function_call.name}\n</summary>\n\n```json\n{args}\n```\n\n</details>\n\n"
