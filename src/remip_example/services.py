@@ -72,15 +72,15 @@ class AgentService:
     def list_talk_sessions(self, user_id: str) -> list[str]:
         return list(self._sessions.get(user_id, {}).keys())
 
-        def add_message(self, user_id: str, session_id: str, message_content: str):
-            user_content = Content(parts=[Part(text=message_content)], role="user")
+    def add_message(self, user_id: str, session_id: str, message_content: str):
+        user_content = Content(parts=[Part(text=message_content)], role="user")
 
-            with self._task_status_lock:
-                self._task_is_running[session_id] = True  # Keep this for UI feedback
+        with self._task_status_lock:
+            self._task_is_running[session_id] = True  # Keep this for UI feedback
 
-            # Put the message into the session's message queue
+        # Put the message into the session's message queue
 
-            self._session_message_queues[session_id].put_nowait(user_content)
+        self._session_message_queues[session_id].put_nowait(user_content)
 
     def get_historical_events(self, user_id: str, session_id: str) -> list[Event]:
         """Returns the list of historical messages for a session."""
