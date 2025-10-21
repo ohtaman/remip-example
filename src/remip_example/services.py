@@ -79,7 +79,6 @@ class AgentService:
             self._task_is_running[session_id] = True  # Keep this for UI feedback
 
         # Put the message into the session's message queue
-
         self._session_message_queues[session_id].put_nowait(user_content)
 
     def get_historical_events(self, user_id: str, session_id: str) -> list[Event]:
@@ -110,8 +109,32 @@ class AgentService:
             yield event
 
     def stop(self):
+        print("AgentService: Stopping...")
         self._is_running = False
         self._command_q.put(("TERMINATE", None, None))
+        # Wait for the worker thread to finish its execution
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=5)  # Give it some time to shut down
+            if self._worker_thread.is_alive():
+                print("AgentService: Worker thread did not terminate gracefully.")
+
+    async def _shutdown_tasks(self):
+        print("AgentService: Shutting down active tasks...")
+        # Cancel all active session tasks
+        for session_id, task in list(self._active_tasks.items()):
+            if not task.done():
+                print(f"AgentService: Cancelling task for session {session_id}")
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    print(f"AgentService: Task for session {session_id} cancelled.")
+                except Exception as e:
+                    print(
+                        f"AgentService: Error awaiting cancelled task for session {session_id}: {e}"
+                    )
+            del self._active_tasks[session_id]
+        print("AgentService: All active tasks shut down.")
 
     def _runner(self):
         """The main entry point for the background thread."""
@@ -159,7 +182,8 @@ class AgentService:
                         )
                     continue  # Continue to next command
                 elif command == "TERMINATE":
-                    print("PRODUCER: TERMINATE command received. Exiting loop.")
+                    print("PRODUCER: TERMINATE command received. Initiating shutdown.")
+                    await self._shutdown_tasks()  # Call the new shutdown coroutine
                     break
 
             except queue.Empty:
@@ -219,7 +243,11 @@ class AgentService:
                     f"SESSION TASK [{task_name}]: Entering async for loop for session {session_id}."
                 )
                 async for item in async_iterable:
-                    response_q.put(item)
+                    # break if new messages pushed.
+                    if session_message_queue.empty():
+                        response_q.put(item)
+                    else:
+                        break
                     print(
                         f"SESSION TASK [{task_name}]: Put item to response_q for session {session_id}."
                     )
