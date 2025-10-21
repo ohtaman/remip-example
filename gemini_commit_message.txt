@@ -1,0 +1,22 @@
+feat: Implement "Task per Talk Session" model and fix hang issue
+
+This commit refactors the agent task management to a "Task per Talk Session" model,
+where a single long-running task processes messages sequentially for each session.
+This approach avoids abrupt task cancellation, which was identified as the root
+cause of the anyio RuntimeError.
+
+Key changes include:
+- **AgentService Refactoring:**
+  - Introduced _session_message_queues (asyncio.Queue) for session-specific message buffering.
+  - Modified create_talk_session to initialize session message queues and start a long-running session task.
+  - Modified add_message to put user messages directly into the session's message queue.
+  - Refactored _producer_loop to manage long-running session tasks and removed previous per-message task cancellation logic.
+  - Introduced _run_agent_task_per_session as the new long-running task handler for each session.
+  - Removed the old _run_agent_task function.
+- **Hang Fix:**
+  - Changed _output_queues to use an unbounded standard queue.Queue to prevent blocking.
+  - Ensured async_iterable.aclose() is called in the finally block of _run_agent_task_per_session for proper resource cleanup.
+- **Debugging:**
+  - Added extensive debug print statements to _producer_loop and _run_agent_task_per_session to aid in tracing execution flow.
+
+These changes aim to provide a more stable and predictable task lifecycle, resolving the intermittent hangs and anyio related errors.

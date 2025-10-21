@@ -1,6 +1,7 @@
 """The main Streamlit application for the remip-example."""
 
 import json
+import time
 import uuid
 
 from pydantic import Json, TypeAdapter
@@ -37,7 +38,7 @@ def main():
 
     is_agent_mode = st.sidebar.checkbox("Use Agent Mode (LoopAgent)", value=True)
 
-    if st.sidebar.button("New Talk"):
+    if st.sidebar.button("New Talk", type="primary"):
         session_id = agent_service.create_talk_session(
             user_id=user_id, is_agent_mode=is_agent_mode
         )
@@ -53,33 +54,34 @@ def main():
             st.rerun()
 
     # --- Chat Interface ---
-    if "selected_session_id" in st.session_state:
-        selected_session_id = st.session_state.selected_session_id
-        st.header(f"Session: {selected_session_id}")
+    if "selected_session_id" not in st.session_state:
+        st.info("Select a talk from the sidebar or create a new one.")
+        st.stop()
 
-        for event in agent_service.get_historical_messages(
+    selected_session_id = st.session_state.selected_session_id
+    st.header(f"Session: {selected_session_id}")
+
+    if prompt := st.chat_input("Input your request"):
+        agent_service.add_message(
+            user_id=user_id, session_id=selected_session_id, message_content=prompt
+        )
+        time.sleep(1)
+        st.rerun()
+
+    def generate_events():
+        for event in agent_service.get_historical_events(
             user_id=user_id, session_id=selected_session_id
         ):
-            author, text_chunk, _ = process_event(event)
-            with st.chat_message(author):
-                st.markdown(text_chunk, unsafe_allow_html=True)
-
-        if prompt := st.chat_input("What is up?"):
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            agent_service.add_message(
-                user_id=user_id, session_id=selected_session_id, message_content=prompt
-            )
+            yield event
 
         if agent_service.is_task_running(selected_session_id):
             for event in agent_service.stream_new_responses(selected_session_id):
-                author, text_chunk, _ = process_event(event)
-                with st.chat_message(author):
-                    st.markdown(text_chunk, unsafe_allow_html=True)
+                yield event
 
-    else:
-        st.info("Select a talk from the sidebar or create a new one.")
+    for event in generate_events():
+        author, text_chunk, _ = process_event(event)
+        with st.chat_message(author):
+            st.markdown(text_chunk, unsafe_allow_html=True)
 
 
 def process_event(event: Event) -> tuple[str | None, str | None, str | None]:

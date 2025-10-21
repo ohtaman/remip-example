@@ -87,7 +87,7 @@ def get_mcp_toolset() -> McpToolset:
         connection_params=StreamableHTTPConnectionParams(
             url=f"http://localhost:{port}/mcp/",
             timeout=30,
-            terminate_on_close=True,
+            terminate_on_close=False,
         ),
     )
 
