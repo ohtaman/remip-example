@@ -208,6 +208,7 @@ class AgentService:
 
         session_message_queue = self._session_message_queues[session_id]
         response_q = self._output_queues[session_id]
+        previous_event = None
 
         try:
             while True:
@@ -235,8 +236,12 @@ class AgentService:
                     session_id=session_id,
                     user_id=user_id,
                     run_config=RunConfig(
-                        streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS
+                        streaming_mode=StreamingMode.SSE,
+                        max_llm_calls=NORMAL_MAX_CALLS,
                     ),
+                    invocation_id=previous_event.invocation_id
+                    if previous_event
+                    else None,
                 )
                 print(
                     f"SESSION TASK [{task_name}]: Agent run_async started for session {session_id}."
@@ -249,12 +254,15 @@ class AgentService:
                     # break if new messages pushed.
                     if session_message_queue.empty():
                         response_q.put(item)
+                        previous_event = item
                     else:
                         print("SESSION TASK [{task_name}]: new message recieved.")
                         break
                     print(
                         f"SESSION TASK [{task_name}]: Put item to response_q for session {session_id}."
                     )
+                else:
+                    previous_event = None
                 print(
                     f"SESSION TASK [{task_name}]: Exited async for loop for session {session_id}."
                 )

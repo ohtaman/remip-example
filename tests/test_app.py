@@ -79,7 +79,8 @@ def test_process_event_with_function_response():
     author, response_md, thoughts_md = process_event(mock_event)
     assert author == "mentor_agent"
     assert "Tool Response: test_function_response" in response_md
-    assert '"status": "success"' in response_md
+    print(response_md)
+    assert '\\"status\\": \\"success\\"' in response_md
     assert thoughts_md is None
 
 

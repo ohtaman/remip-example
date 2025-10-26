@@ -1,6 +1,8 @@
 """Agent-building logic for the remip-example application."""
 
 import os
+from collections.abc import Mapping
+from typing import Any
 
 from google.adk.agents import Agent, LlmAgent, LoopAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -8,6 +10,8 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.tools import BaseTool, ToolContext, exit_loop
 from google.genai import types
 from mcp.types import CallToolResult
+
+import streamlit as st
 
 from remip_example.config import (
     MENTOR_AGENT_INSTRUCTION,
@@ -23,27 +27,42 @@ def clear_tool_calling_track(callback_context: CallbackContext) -> None:
 
 def track_tool_calling(
     tool: BaseTool,
-    args: dict[str, any],
+    args: dict[str, Any],
     tool_context: ToolContext,
-    tool_response: CallToolResult,
+    tool_response: CallToolResult | Mapping[str, Any] | None,
 ) -> None:
     if "tools_used" not in tool_context.state:
         tool_context.state["tools_used"] = []
 
-    truncated_args = {
-        k: str(v)[:128] + "..." if len(str(v)) > 128 else "" for k, v in args.items()
-    }
+    truncated_args: dict[str, str] = {}
+    for k, v in args.items():
+        value = str(v)
+        truncated_args[k] = value[:128] + "..." if len(value) > 128 else value
+
+    success = True
+    if tool_response is None:
+        success = True
+    elif isinstance(tool_response, Mapping):
+        if "isError" in tool_response:
+            success = not bool(tool_response.get("isError", False))
+        elif tool_response.get("error") or tool_response.get("error_message"):
+            success = False
+        else:
+            success = True
+    else:
+        success = not bool(getattr(tool_response, "isError", False))
 
     tool_context.state["tools_used"].append(
         {
             "agent": tool_context.agent_name,
             "tool": tool.name,
             "args": truncated_args,
-            "success": not tool_response.isError,
+            "success": success,
         }
     )
 
 
+@st.cache_resource
 def build_agent(
     is_agent_mode: bool = True,
     max_iterations: int = 50,
@@ -89,7 +108,7 @@ def build_agent(
                 thinking_budget=1024,
             )
         ),
-        tools=[exit_loop, ask, get_mcp_toolset()],
+        tools=[exit_loop, ask],  # , get_mcp_toolset()],
         output_key="mentor_result",
     )
 
@@ -98,4 +117,5 @@ def build_agent(
         sub_agents=[remip_agent, mentor_agent],
         max_iterations=max_iterations,
     )
+    print("BUILD_AGENT", id(remip_agent.tools[0]), id(remip_agent), id(mentor_agent))
     return agent
