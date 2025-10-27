@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import time
-import uuid
 import json
 import queue
 import asyncio
@@ -198,21 +197,7 @@ def ensure_http_server(port: int = 3333) -> int:
 
 
 # ----------------------------- MCP Toolset factory ----------------------------------------
-def build_mcp_toolset(
-    headers_provider: Optional[Callable[[], Dict[str, str]]] = None,
-) -> McpToolset:
-    """
-    Sticky logical session is carried by headers_provider on every call.
-    """
-    header_provider = None
-    if headers_provider is not None:
-
-        def _header_provider(_context):
-            headers = headers_provider() or {}
-            return headers
-
-        header_provider = _header_provider
-
+def build_mcp_toolset() -> McpToolset:
     port = ensure_http_server(3333)
     return McpToolset(
         connection_params=StreamableHTTPConnectionParams(
@@ -220,7 +205,6 @@ def build_mcp_toolset(
             timeout=30,
             terminate_on_close=True,  # HTTP session ends when toolset is closed
         ),
-        header_provider=header_provider,
     )
 
 
@@ -412,8 +396,6 @@ class StreamWorker:
             timeout_val = 0.0
         self._handoff_timeout: float | None = timeout_val if timeout_val > 0 else None
 
-        self._headers_provider = headers_provider
-
         self._thread.start()
         while self._loop is None:
             time.sleep(0.01)
@@ -431,7 +413,7 @@ class StreamWorker:
         return fut.result()
 
     async def _init_adk_objects(self):
-        self._toolset = build_mcp_toolset(headers_provider=self._headers_provider)
+        self._toolset = build_mcp_toolset()
         agent = build_loop_agent(self._toolset)
         svc = InMemorySessionService()
         self._session_service = svc
@@ -921,34 +903,24 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
 
 
 @st.cache_resource
-def get_worker(_headers_provider: Callable[[], Dict[str, str]]) -> StreamWorker:
-    return StreamWorker(headers_provider=_headers_provider)
+def get_worker() -> StreamWorker:
+    return StreamWorker()
 
 
 def main():
-    st.set_page_config(page_title="LoopAgent × ADK × Streamlit — Worker", page_icon="♻️")
-    st.title("LoopAgent × ADK × Streamlit — worker-loop streaming (sticky session)")
+    st.set_page_config(page_title="ReMIP", page_icon="🎓")
+    st.title("ReMIP")
 
     if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
         st.error("No API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
         st.stop()
-
-    if "remip_sid" not in st.session_state:
-        st.session_state.remip_sid = f"st-{uuid.uuid4()}"
-
-    def _headers_provider():
-        return {
-            "X-Remip-Session": st.session_state.remip_sid,
-            "X-App-Name": APP_NAME,
-            "X-User-Id": USER_ID,
-        }
 
     ss = st.session_state
     if not ss.get("loop_status_css_applied"):
         st.markdown(LOOP_STATUS_CSS, unsafe_allow_html=True)
         ss.loop_status_css_applied = True
     if "worker" not in ss:
-        ss.worker = get_worker(_headers_provider=_headers_provider)
+        ss.worker = get_worker()
         ss.live_text = ""
         ss.streaming_active = False
         ss.active_stream_id = None
