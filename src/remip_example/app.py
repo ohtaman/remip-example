@@ -10,6 +10,7 @@ import subprocess
 import atexit
 import signal
 import socket
+import platform
 import html
 from collections.abc import Mapping
 from typing import Optional, Any, Callable, Dict
@@ -36,6 +37,7 @@ from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
 from remip_example.chat_history import build_committed_events_from_partials
 from remip_example.ui_components import load_examples
+from remip_example.utils import ensure_node
 
 
 APP_NAME = "agents"  # Align with ADK's default app name
@@ -809,6 +811,13 @@ def get_worker() -> StreamWorker:
 
 
 def main():
+    if platform.processor() == "":
+        NODE_BIN_DIR = ensure_node()
+        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
+            os.environ["PATH"] = os.pathsep.join(
+                (str(NODE_BIN_DIR), os.environ.get("PATH", ""))
+            )
+
     st.set_page_config(page_title="ReMIP", page_icon="🎓")
     st.title("ReMIP")
 
