@@ -9,13 +9,13 @@ from remip_example.ui_components import load_examples, settings_form
 
 
 @patch("pathlib.Path.glob")
-@patch("builtins.open", new_callable=mock_open, read_data="Title\nContent")
+@patch("builtins.open", new_callable=mock_open, read_data="# Title\nContent")
 def test_load_examples(mock_file, mock_glob):
     """Test that it loads examples from a directory."""
     mock_glob.return_value = [Path("examples/ja/example1.md")]
     examples = load_examples("ja")
     assert "Title" in examples
-    assert examples["Title"] == "Title\nContent"
+    assert examples["Title"] == "# Title\nContent"
 
 
 @patch("pathlib.Path.glob")
