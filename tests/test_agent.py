@@ -112,3 +112,35 @@ def test_track_tool_calling_truncates_long_args():
     truncated_arg = record["args"]["long_arg"]
     assert len(truncated_arg) == 128 + 3
     assert truncated_arg.endswith("...")
+
+
+def test_track_tool_calling_accepts_dict_response():
+    """track_tool_calling should tolerate dict-based tool responses."""
+    tool = MagicMock()
+    tool.name = "dict_tool"
+    args = {}
+    tool_context = MagicMock()
+    tool_context.state = {}
+    tool_context.agent_name = "dict_agent"
+    tool_response = {"result": "ok", "isError": False}
+
+    track_tool_calling(tool, args, tool_context, tool_response)
+
+    record = tool_context.state["tools_used"][0]
+    assert record["success"] is True
+
+
+def test_track_tool_calling_marks_error_from_dict():
+    """track_tool_calling should mark dict responses with error keys as failures."""
+    tool = MagicMock()
+    tool.name = "dict_tool"
+    args = {}
+    tool_context = MagicMock()
+    tool_context.state = {}
+    tool_context.agent_name = "dict_agent"
+    tool_response = {"error": "Something failed"}
+
+    track_tool_calling(tool, args, tool_context, tool_response)
+
+    record = tool_context.state["tools_used"][0]
+    assert record["success"] is False

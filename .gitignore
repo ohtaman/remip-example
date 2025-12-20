@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 wheels/
+.pytest_cache/
 *.egg-info
 
 # Virtual environments
@@ -11,6 +12,12 @@ wheels/
 .env
 .streamlit/secrets.toml
 
+
+# Other
+.ruff_cache/
+.DS_Store
 .node
+specs/
 session.db
 .tmp/
+docs/develop

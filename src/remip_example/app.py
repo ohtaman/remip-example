@@ -1,388 +1,1165 @@
-"""
-Main Streamlit application for the remip-example.
+# from __future__ import annotations
 
-This script orchestrates the UI, agent execution, and session management,
-relying on helper modules for specific functionalities.
-"""
-
-import json
 import os
+import time
+import json
 import queue
-import threading
-import uuid
-from typing import Any, AsyncIterator, Awaitable, Callable, Generator
-
 import asyncio
+import threading
+import subprocess
+import atexit
+import signal
+import socket
+import html
+from collections.abc import Mapping
+from typing import Optional, Any, Callable, Dict
+
 import streamlit as st
-from google.adk.agents import RunConfig
+import logging
+
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx as _add_ctx
+except Exception:
+    _add_ctx = None
+
+from google.adk.agents import Agent, LlmAgent, LoopAgent, RunConfig
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import StreamingMode
-from google.adk.events.event import Event
+from google.adk.planners import BuiltInPlanner
 from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.adk.events import Event
+from google.adk.tools import BaseTool, ToolContext, exit_loop
 from google.genai import types
 
-from remip_example.agent import build_agent
-from remip_example.config import APP_NAME, NORMAL_MAX_CALLS
-from remip_example.services import (
-    clear_talk_session,
-    create_talk_session,
-    get_session_service,
-    get_talk_session,
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+from remip_example.chat_history import build_committed_events_from_partials
+from remip_example.ui_components import load_examples
+
+
+APP_NAME = "agents"  # Align with ADK's default app name
+USER_ID = "demo-user-001"
+
+AVATARS = {"remip_agent": "🦸", "mentor_agent": "🧚", "user": None}
+
+# ------------------- Silence teardown noise (cosmetic only) -------------------
+logging.getLogger("mcp.client.stdio").setLevel(logging.ERROR)
+logging.getLogger("google.adk.tools.mcp_tool.mcp_session_manager").setLevel(
+    logging.ERROR
 )
-from remip_example.ui_components import (
-    api_key_dialog,
-    load_examples,
-    new_session_form,
-    settings_form,
+logging.getLogger("google_adk.google.adk.tools.base_authenticated_tool").setLevel(
+    logging.ERROR
 )
 
-AVATARS = {"remip_agent": "🦸", "mentor_agent": "🧚", "user": ""}
+logger = logging.getLogger("remip.loop_worker")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+log_level_name = os.getenv("REMIP_LOOP_LOG_LEVEL", "INFO").upper()
+logger.setLevel(getattr(logging, log_level_name, logging.INFO))
+logger.propagate = False
 
 
-class AsyncIteratorBridge:
-    """
-    A bridge to allow a background thread running an async generator to communicate
-    with the main Streamlit thread.
-    """
-
-    def __init__(self):
-        self.SENTINEL = object()
-        self.q = queue.Queue()
-        self._command_q = queue.Queue()
-        self.current_generator = None
-        self.thread = threading.Thread(target=self._runner, daemon=True)
-        self.thread.start()
-
-    def _runner(self):
-        """The main entry point for the background thread."""
+# ------------------- HTTP helper: spawn + cache MCP server (port 3333) --------------------
+def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            asyncio.run(self._producer_loop())
-        except Exception:
-            # In a real app, you'd want to log this.
-            pass
+            with socket.create_connection((host, port), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
 
-    async def _producer_loop(self):
-        """The core async event loop for the background thread."""
-        agent_task = None
-        while True:
+
+@st.cache_resource
+def ensure_http_server(port: int = 3333) -> int:
+    """
+    Start the MCP server (HTTP mode) once per Streamlit session, and keep it alive
+    across reruns. It will be terminated by the atexit handler when the process exits.
+    """
+    proc = subprocess.Popen(
+        [
+            "npx",
+            "-y",
+            "github:ohtaman/remip-mcp",
+            "--http",
+            "--start-remip-server",
+            "--port",
+            str(port),
+        ],
+        start_new_session=True,
+    )
+
+    def _cleanup():
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=5)
+        except Exception:
             try:
-                command, data = self._command_q.get_nowait()
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait()
+            except Exception:
+                pass
 
-                if command == "START":
-                    if agent_task:
-                        if self.current_generator is not None:
-                            print(self.current_generator)
-                            await self.current_generator.aclose()
-                        agent_task.cancel()
-                        try:
-                            await agent_task
-                        except (asyncio.CancelledError, StopAsyncIteration):
-                            pass  # Expected cancellation
+    atexit.register(_cleanup)
 
-                    # Clear the queue before starting a new task
-                    while not self.q.empty():
-                        self.q.get_nowait()
+    if not _wait_for_port("127.0.0.1", port, timeout=10.0):
+        raise RuntimeError(f"MCP HTTP server failed to start on port {port}")
+    return port
 
-                    factory = data
-                    agent_task = asyncio.create_task(self._run_agent_task(factory))
 
-                elif command == "STOP":
-                    if agent_task:
-                        agent_task.cancel()
-                        try:
-                            await agent_task
-                        except (asyncio.CancelledError, StopAsyncIteration):
-                            pass  # Expected cancellation
-                        agent_task = None
+# ----------------------------- MCP Toolset factory ----------------------------------------
+def build_mcp_toolset() -> McpToolset:
+    port = ensure_http_server(3333)
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=f"http://127.0.0.1:{port}/mcp/",
+            timeout=30,
+            terminate_on_close=True,  # HTTP session ends when toolset is closed
+        ),
+    )
 
-                    while not self.q.empty():
-                        self.q.get_nowait()
-                    self.q.put(self.SENTINEL)
 
-                elif command == "TERMINATE":
-                    if agent_task:
-                        agent_task.cancel()
-                    break
-            except queue.Empty:
-                await asyncio.sleep(0.01)
+# ---------------------- LoopAgent builder (uses long-lived toolset) -----------------------
+def clear_tool_calling_track(callback_context: CallbackContext) -> None:
+    callback_context.state["tools_used"] = []
 
-    async def _run_agent_task(self, factory):
-        """Runs the agent's async iterator and puts results on the response queue."""
+
+def track_tool_calling(
+    tool: BaseTool,
+    args: dict[str, Any],
+    tool_context: ToolContext,
+    tool_response: Any,
+) -> None:
+    logger.debug(
+        "Tool call start agent=%s tool=%s args=%s",
+        tool_context.agent_name,
+        getattr(tool, "name", type(tool).__name__),
+        {
+            k: (repr(v)[:120] + "..." if len(repr(v)) > 120 else repr(v))
+            for k, v in args.items()
+        },
+    )
+    if "tools_used" not in tool_context.state:
+        tool_context.state["tools_used"] = []
+    truncated_args = {
+        k: (str(v)[:128] + "..." if len(str(v)) > 128 else str(v))
+        for k, v in args.items()
+    }
+    tool_context.state["tools_used"].append(
+        {
+            "agent": tool_context.agent_name,
+            "tool": tool.name,
+            "args": truncated_args,
+            "success": not getattr(tool_response, "isError", False),
+        }
+    )
+    logger.debug(
+        "Tool call done agent=%s tool=%s success=%s",
+        tool_context.agent_name,
+        getattr(tool, "name", type(tool).__name__),
+        not getattr(tool_response, "isError", False),
+    )
+
+
+def build_loop_agent(
+    toolset: McpToolset,
+    model: str | None = None,
+    remip_instruction: str | None = None,
+    mentor_instruction: str | None = None,
+    thinking_budget: int = 2048,
+    max_iterations: int = 50,
+) -> Agent:
+    model = model or os.getenv("REMIP_AGENT_MODEL", "gemini-2.5-flash")
+    remip_instruction = remip_instruction or os.getenv(
+        "REMIP_AGENT_INSTRUCTION",
+        "You are a mathematical optimization and coding assistant. Use tools when helpful. Be precise.",
+    )
+    mentor_instruction = mentor_instruction or os.getenv(
+        "MENTOR_AGENT_INSTRUCTION",
+        (
+            "You are a mentor/orchestrator. If the last step seems sufficient, call exit_loop. "
+            "Otherwise, briefly justify continuing and hand the work back to the remip_agent. "
+            "Never execute heavy tools yourself—do not call define_model, solve_model, or other MCP tools. "
+            "If further tool work is required, simply explain what still needs to happen."
+        ),
+    )
+
+    remip_agent = LlmAgent(
+        name="remip_agent",
+        model=model,
+        description="Agent for mathematical optimization and coding",
+        instruction=remip_instruction,
+        planner=BuiltInPlanner(
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True, thinking_budget=thinking_budget
+            )
+        ),
+        tools=[toolset],  # MCP tool access only for the worker agent
+        output_key="work_result",
+        before_agent_callback=clear_tool_calling_track,
+        after_tool_callback=track_tool_calling,
+    )
+
+    def ask(tool_context: ToolContext):
+        return exit_loop(tool_context)
+
+    mentor_tools: list[BaseTool] = [exit_loop, ask]
+    if toolset is not None:
+        mentor_tools.append(toolset)
+
+    mentor_agent = LlmAgent(
+        name="mentor_agent",
+        model=model,
+        description="Agent that judges whether to continue the loop",
+        instruction=mentor_instruction,
+        planner=BuiltInPlanner(
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True, thinking_budget=1024
+            )
+        ),
+        tools=mentor_tools,
+        output_key="mentor_result",
+    )
+
+    agent = LoopAgent(
+        name="orchestrator",
+        sub_agents=[remip_agent, mentor_agent],
+        max_iterations=max_iterations,
+    )
+    return agent
+
+
+def _summarize_event(event: Event) -> str:
+    parts: list[str] = []
+    event_type = getattr(event, "event_type", None) or getattr(event, "type", None)
+    if event_type:
+        parts.append(f"type={event_type}")
+    source = getattr(event, "source", None)
+    if source:
+        parts.append(f"source={source}")
+    author = getattr(event, "author", None)
+    if author and author != source:
+        parts.append(f"author={author}")
+    agent_name = getattr(event, "agent_name", None)
+    if agent_name and agent_name not in (source, author):
+        parts.append(f"agent={agent_name}")
+    if hasattr(event, "is_final_response"):
         try:
-            async_iterable = await factory()
-            self.current_generator = async_iterable
-            async for item in async_iterable:
-                self.q.put(item)
-        except (asyncio.CancelledError, StopAsyncIteration):
-            pass
+            parts.append(f"final={event.is_final_response()}")
         except Exception:
-            # In a real app, you'd want to log this.
-            pass
+            parts.append("final=?")
+    invocation_id = getattr(event, "invocation_id", None)
+    if invocation_id:
+        parts.append(f"invocation_id={invocation_id}")
+    metadata = getattr(event, "metadata", None)
+    if isinstance(metadata, Mapping):
+        for key in (
+            "loop_action",
+            "iteration",
+            "mentor_decision",
+            "reason",
+            "status",
+        ):
+            if key in metadata:
+                value = metadata[key]
+                if isinstance(value, str) and len(value) > 80:
+                    value = value[:77] + "..."
+                parts.append(f"{key}={value}")
+    return ", ".join(parts) if parts else repr(event)
+
+
+# ------------------------ Worker that owns async lifecycle ---------------------------------
+class StreamWorker:
+    """
+    One thread, one asyncio loop, one long-lived MCP toolset + Runner + Session + LoopAgent.
+    Ensures agent create/iterate/close happens in the SAME task lineage (no cross-task close).
+    """
+
+    def __init__(
+        self, headers_provider: Optional[Callable[[], Dict[str, str]]] = None
+    ) -> None:
+        self._log = logger
+        self._debug_events = logger.isEnabledFor(logging.DEBUG)
+        self._log.debug("StreamWorker initializing")
+        self._thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="MCPWorker"
+        )
+        if _add_ctx:
+            _add_ctx(self._thread)
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        self._toolset: Optional[McpToolset] = None
+        self._runner: Optional[Runner] = None
+        self._session_id: Optional[str] = None
+        self._session_service: Optional[InMemorySessionService] = None
+
+        self.out_q: queue.Queue = queue.Queue()
+
+        self._current_task: Optional[asyncio.Task] = None
+        self._current_stream_id: int = 0
+        self._interrupt_flag: bool = False
+        timeout_str = os.getenv("REMIP_INTERRUPT_FLUSH_TIMEOUT", "0").strip()
+        try:
+            timeout_val = float(timeout_str)
+        except ValueError:
+            timeout_val = 0.0
+        self._handoff_timeout: float | None = timeout_val if timeout_val > 0 else None
+
+        self._thread.start()
+        while self._loop is None:
+            time.sleep(0.01)
+        self._run_coro_blocking(self._init_adk_objects())
+        self._log.info("StreamWorker ready (session_id=%s)", self._session_id)
+        atexit.register(self.close)
+
+    def _run_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _run_coro_blocking(self, coro):
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return fut.result()
+
+    async def _init_adk_objects(self):
+        self._toolset = build_mcp_toolset()
+        agent = build_loop_agent(self._toolset)
+        svc = InMemorySessionService()
+        self._session_service = svc
+        self._runner = Runner(app_name=APP_NAME, agent=agent, session_service=svc)
+        created = await svc.create_session(app_name=APP_NAME, user_id=USER_ID)
+        self._session_id = created.id
+        self._log.debug("ADK objects initialized (session_id=%s)", self._session_id)
+
+    def start_stream(self, prompt: str) -> int:
+        active_id = self._current_stream_id
+        if self._current_task and not self._current_task.done():
+            self._log.info("Interrupting active stream %s with new prompt", active_id)
+        self._current_stream_id += 1
+        stream_id = self._current_stream_id
+        previous_task = self._current_task
+        previous_stream_id = active_id if active_id != stream_id else None
+        self._interrupt_flag = True
+        preview = prompt.replace("\n", " ").strip()
+        if len(preview) > 80:
+            preview = preview[:77] + "..."
+        self._log.info("Starting stream %s (prompt='%s')", stream_id, preview)
+
+        def _start():
+            task = asyncio.create_task(
+                self._stream_task(
+                    stream_id,
+                    prompt,
+                    previous_task=previous_task,
+                    previous_stream_id=previous_stream_id,
+                ),
+                name=f"stream-{stream_id}",
+            )
+            self._current_task = task
+
+        self._loop.call_soon_threadsafe(_start)
+        return stream_id
+
+    def interrupt(self):
+        self._interrupt_flag = True
+        self._log.info("Interrupt flag set for stream %s", self._current_stream_id)
+
+    def close(self):
+        async def _close():
+            try:
+                self._log.info("Closing StreamWorker")
+                if self._current_task and not self._current_task.done():
+                    self._interrupt_flag = True
+                    await asyncio.sleep(0)
+                if self._toolset is not None:
+                    await self._toolset.close()
+                await asyncio.sleep(0)
+                self._log.info("StreamWorker close completed")
+            except Exception as exc:
+                self._log.exception("Error while closing StreamWorker: %s", exc)
+
+        self._run_coro_blocking(_close())
+
+    def get_history_messages(self) -> list[Event]:
+        return self._run_coro_blocking(self._get_history_messages())
+
+    async def _get_history_messages(self) -> list[Event]:
+        if not self._session_service or not self._session_id:
+            return []
+
+        session = await self._session_service.get_session(
+            app_name=APP_NAME,
+            user_id=USER_ID,
+            session_id=self._session_id,
+        )
+        events = getattr(session, "events", None) or []
+        return list(events)
+
+    async def _stream_task(
+        self,
+        stream_id: int,
+        prompt: str,
+        *,
+        previous_task: Optional[asyncio.Task] = None,
+        previous_stream_id: Optional[int] = None,
+    ):
+        if previous_task and not previous_task.done():
+            self.out_q.put(
+                (
+                    "status",
+                    stream_id,
+                    {
+                        "state": "handover_wait",
+                        "waiting_for": previous_stream_id,
+                    },
+                )
+            )
+        await self._await_previous_task(previous_task, previous_stream_id, stream_id)
+        assert self._runner is not None and self._session_id is not None
+        self._interrupt_flag = False
+        self.out_q.put(
+            (
+                "status",
+                stream_id,
+                {
+                    "state": "starting",
+                    "agent": "remip_agent",
+                },
+            )
+        )
+        self.out_q.put(("reset", stream_id, None))
+        preview = prompt.replace("\n", " ").strip()
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        self._log.info("Stream %s task started (prompt='%s')", stream_id, preview)
+
+        agen = None
+        carry_events: list[Event] = []
+        interrupted = False
+        try:
+            user_msg = types.Content(role="user", parts=[types.Part(text=prompt)])
+            agen = self._runner.run_async(
+                user_id=USER_ID,
+                session_id=self._session_id,
+                new_message=user_msg,
+                run_config=RunConfig(
+                    streaming_mode=StreamingMode.SSE, max_llm_calls=100
+                ),
+            )
+            self._log.debug("Stream %s run_async issued", stream_id)
+
+            async for event in agen:
+                if self._debug_events:
+                    self._log.debug(
+                        "Stream %s event: %s", stream_id, _summarize_event(event)
+                    )
+                status_payload = self._build_status_payload(event)
+                if status_payload:
+                    status_payload["state"] = status_payload.get("state") or "running"
+                    self.out_q.put(("status", stream_id, status_payload))
+                if self._interrupt_flag or stream_id != self._current_stream_id:
+                    self._log.info(
+                        "Stream %s interrupted (flag=%s, current=%s)",
+                        stream_id,
+                        self._interrupt_flag,
+                        self._current_stream_id,
+                    )
+                    try:
+                        await agen.aclose()
+                    except Exception:
+                        pass
+                    interrupted = True
+                    break
+
+                text_chunk, thought_chunk, tool_calls, tool_responses = (
+                    extract_event_fragments(event)
+                )
+                if tool_calls:
+                    for call_payload in tool_calls:
+                        self.out_q.put(("function_call", stream_id, call_payload))
+                if tool_responses:
+                    for response_payload in tool_responses:
+                        self.out_q.put(
+                            ("function_response", stream_id, response_payload)
+                        )
+                if text_chunk:
+                    kind = "chunk"
+                    if event.is_final_response():
+                        kind = "final_chunk"
+                    if self._debug_events:
+                        preview = text_chunk.replace("\n", " ").strip()
+                        if len(preview) > 120:
+                            preview = preview[:117] + "..."
+                        self._log.debug(
+                            "Stream %s text chunk len=%s preview='%s' final=%s kind=%s",
+                            stream_id,
+                            len(text_chunk),
+                            preview,
+                            event.is_final_response(),
+                            kind,
+                        )
+                    self.out_q.put((kind, stream_id, text_chunk))
+                if thought_chunk:
+                    kind = "thought"
+                    if event.is_final_response():
+                        kind = "final_thought"
+                    self.out_q.put((kind, stream_id, thought_chunk))
+                if not event.is_final_response():
+                    carry_events.append(event)
+                else:
+                    inv_id = getattr(event, "invocation_id", None)
+                    if inv_id is None:
+                        carry_events.clear()
+                    else:
+                        carry_events = [
+                            ev
+                            for ev in carry_events
+                            if getattr(ev, "invocation_id", None) != inv_id
+                        ]
+                    self._log.info(
+                        "Stream %s final response received: %s",
+                        stream_id,
+                        _summarize_event(event),
+                    )
+
+            if not interrupted:
+                self._log.info("Stream %s completed normally", stream_id)
+                self.out_q.put(
+                    (
+                        "status",
+                        stream_id,
+                        {
+                            "state": "completed",
+                            "agent": "remip_agent",
+                        },
+                    )
+                )
+                self.out_q.put(("done", stream_id, None))
+
+        except Exception as e:
+            self._log.exception("Stream %s encountered error: %s", stream_id, e)
+            self.out_q.put(
+                (
+                    "status",
+                    stream_id,
+                    {
+                        "state": "error",
+                        "agent": "remip_agent",
+                        "error": str(e),
+                    },
+                )
+            )
+            self.out_q.put(("error", stream_id, f"{type(e).__name__}: {e}"))
         finally:
-            self.q.put(self.SENTINEL)
+            if agen is not None:
+                try:
+                    await agen.aclose()
+                except Exception:
+                    pass
+            if carry_events:
+                self._log.debug(
+                    "Stream %s committing %d carry events", stream_id, len(carry_events)
+                )
+                await self._commit_carry_events(carry_events)
+            if interrupted:
+                self._log.info("Stream %s marked as interrupted", stream_id)
+                self.out_q.put(
+                    (
+                        "status",
+                        stream_id,
+                        {
+                            "state": "interrupted",
+                            "agent": "remip_agent",
+                            "waiting_for": self._current_stream_id,
+                        },
+                    )
+                )
+                self.out_q.put(("interrupted", stream_id, None))
+            current_task = asyncio.current_task()
+            if current_task and self._current_task is current_task:
+                self._current_task = None
 
-    def start_task(self, factory: Callable[[], Awaitable[AsyncIterator[Any]]]):
-        """Public method for the UI thread to start a new agent task."""
-        self._command_q.put(("START", factory))
+    async def _await_previous_task(
+        self,
+        previous_task: Optional[asyncio.Task],
+        previous_stream_id: Optional[int],
+        new_stream_id: int,
+    ) -> None:
+        if not previous_task or previous_task is asyncio.current_task():
+            return
 
-    def stop_task(self):
-        """Public method for the UI thread to stop the current agent task."""
-        self._command_q.put(("STOP", None))
+        if previous_task.done():
+            try:
+                await asyncio.shield(previous_task)
+            except Exception:
+                pass
+            return
 
-    def __iter__(self) -> Generator[Any, Any, None]:
-        """Allows the UI thread to iterate over results from the response queue."""
-        while True:
-            item = self.q.get()
-            if item is self.SENTINEL:
-                break
-            yield item
+        description = (
+            f"stream {previous_stream_id}" if previous_stream_id else "previous stream"
+        )
+        if self._handoff_timeout:
+            self._log.debug(
+                "Waiting up to %.1fs for %s to finish before starting stream %s",
+                self._handoff_timeout,
+                description,
+                new_stream_id,
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(previous_task),
+                    timeout=self._handoff_timeout,
+                )
+            except asyncio.TimeoutError:
+                self._log.warning(
+                    "%s did not finish within %.1fs; continuing with stream %s",
+                    description.capitalize(),
+                    self._handoff_timeout,
+                    new_stream_id,
+                )
+            except Exception as exc:
+                self._log.exception(
+                    "Error while awaiting %s completion before stream %s: %s",
+                    description,
+                    new_stream_id,
+                    exc,
+                )
+        else:
+            self._log.debug(
+                "Waiting for %s to finish before starting stream %s",
+                description,
+                new_stream_id,
+            )
+            try:
+                await asyncio.shield(previous_task)
+            except Exception as exc:
+                self._log.exception(
+                    "Error while awaiting %s completion before stream %s: %s",
+                    description,
+                    new_stream_id,
+                    exc,
+                )
 
-    def __del__(self):
-        """Ensure the background thread is terminated when the bridge is garbage collected."""
-        self._command_q.put(("TERMINATE", None))
+    def _build_status_payload(self, event: Event) -> Optional[dict[str, Any]]:
+        metadata = getattr(event, "metadata", None)
+        payload: dict[str, Any] = {}
+        if isinstance(metadata, Mapping):
+            for key in (
+                "loop_action",
+                "iteration",
+                "mentor_decision",
+                "reason",
+                "status",
+            ):
+                value = metadata.get(key)
+                if value is not None:
+                    payload[key] = value
+        agent_name = getattr(event, "agent_name", None) or getattr(
+            event, "author", None
+        )
+        if agent_name:
+            payload["agent"] = agent_name
+        role = getattr(getattr(event, "content", None), "role", None)
+        if role:
+            payload.setdefault("role", role)
+        timestamp = getattr(event, "timestamp", None)
+        if timestamp is not None:
+            payload["timestamp"] = timestamp
+
+        payload["partial"] = bool(getattr(event, "partial", False))
+        try:
+            payload["final"] = bool(event.is_final_response())
+        except Exception:
+            payload["final"] = False
+
+        return payload if payload else None
+
+    async def _commit_carry_events(self, carry_events: list[Event]) -> None:
+        if not carry_events or not self._session_service or not self._session_id:
+            return
+
+        self._log.debug(
+            "Committing %d events to session %s",
+            len(carry_events),
+            self._session_id,
+        )
+        session = await self._session_service.get_session(
+            app_name=APP_NAME,
+            user_id=USER_ID,
+            session_id=self._session_id,
+        )
+
+        committed_events = build_committed_events_from_partials(carry_events)
+        for ev in committed_events:
+            await self._session_service.append_event(session=session, event=ev)
+        self._log.debug(
+            "Committed %d events to session %s", len(committed_events), self._session_id
+        )
+
+
+TOOL_SKIP_NAMES = {"exit_loop", "ask"}
+
+
+def _safe_pretty_json(data: Any) -> str:
+    try:
+        return json.dumps(data, indent=2, ensure_ascii=False)
+    except TypeError:
+        return str(data)
+
+
+def render_tool_block(kind: str, name: str, payload: Any) -> str:
+    if not name:
+        return ""
+    title = "Tool Call" if kind == "call" else "Tool Response"
+    pretty = _safe_pretty_json(payload)
+    return (
+        "\n\n<details>\n"
+        f"<summary>\n{title}: {html.escape(name)}\n</summary>\n\n"
+        "```json\n"
+        f"{pretty}\n"
+        "```\n\n"
+        "</details>\n\n"
+    )
+
+
+def extract_event_fragments(
+    event: Event,
+) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
+    content = getattr(event, "content", None)
+    if not content:
+        return "", "", [], []
+
+    text_parts: list[str] = []
+    thought_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    tool_responses: list[dict[str, Any]] = []
+
+    for part in getattr(content, "parts", []) or []:
+        if getattr(part, "thought", False):
+            if getattr(part, "text", None):
+                thought_parts.append(part.text or "")
+        elif getattr(part, "function_call", None):
+            func = getattr(part, "function_call")
+            name = getattr(func, "name", "")
+            if name and name not in TOOL_SKIP_NAMES:
+                tool_calls.append(
+                    {
+                        "name": name,
+                        "args": getattr(func, "args", None),
+                    }
+                )
+        elif getattr(part, "function_response", None):
+            func = getattr(part, "function_response")
+            name = getattr(func, "name", "")
+            if name and name not in TOOL_SKIP_NAMES:
+                tool_responses.append(
+                    {
+                        "name": name,
+                        "response": getattr(func, "response", None),
+                    }
+                )
+        elif getattr(part, "text", None):
+            text_parts.append(part.text or "")
+
+    text = "".join(text_parts)
+    thought = "\n\n".join(tp.strip() for tp in thought_parts if tp.strip())
+    return text, thought, tool_calls, tool_responses
 
 
 def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
-    """
-    Processes an agent Event and formats its content for beautiful display.
+    """Processes an agent Event and formats its content for display."""
+    author = getattr(event, "author", None)
+    text_chunk, thought_chunk, tool_calls, tool_responses = extract_event_fragments(
+        event
+    )
 
-    Returns:
-        A tuple containing (author, response_markdown, thoughts_markdown).
-    """
-    author = event.author
-    if event.content is None:
-        return author, None, None
-
-    response_markdown = ""
-    thoughts_markdown = ""
-
-    for part in event.content.parts:
-        if part.thought:
-            thoughts_markdown += part.text
-        elif part.function_call:
-            tool_name = part.function_call.name
-            tool_args = json.dumps(
-                part.function_call.args, indent=2, ensure_ascii=False
-            )
-            response_markdown += (
-                f"<details><summary>Tool Call: {tool_name}</summary>\n\n"
-                f"```json\n{tool_args}\n```\n\n</details>"
-            )
-        elif part.function_response:
-            tool_name = part.function_response.name
-            try:
-                # Try to serialize the response to a pretty JSON string.
-                tool_response = json.dumps(
-                    part.function_response.response, indent=2, ensure_ascii=False
-                )
-                lang = "json"
-            except TypeError:
-                # If serialization fails, check for a nested CallToolResult.
-                raw_response = part.function_response.response
-                extracted_json = None
-                if isinstance(raw_response, dict) and "result" in raw_response:
-                    result_obj = raw_response["result"]
-                    # Check if it looks like a CallToolResult with nested JSON.
-                    if (
-                        hasattr(result_obj, "content")
-                        and result_obj.content
-                        and hasattr(result_obj.content[0], "text")
-                    ):
-                        try:
-                            # Extract and format the nested JSON string.
-                            parsed_text = json.loads(result_obj.content[0].text)
-                            extracted_json = json.dumps(
-                                parsed_text, indent=2, ensure_ascii=False
-                            )
-                        except (json.JSONDecodeError, IndexError):
-                            pass  # Not a valid JSON string, proceed to str() fallback
-
-                if extracted_json:
-                    tool_response = extracted_json
-                    lang = "json"
-                else:
-                    # The ultimate fallback: convert the object to a plain string.
-                    tool_response = str(raw_response)
-                    lang = "python"
-
-            response_markdown += (
-                f"<details><summary>Tool Response: {tool_name}</summary>\n\n"
-                f"```{lang}\n{tool_response}\n```\n\n</details>"
-            )
-        elif part.text:
-            response_markdown += part.text
-
-    return author, response_markdown or None, thoughts_markdown or None
-
-
-def group_events(events: list[Event]) -> list[tuple[str, str, str]]:
-    """Groups a list of events by author for clean display."""
-    if not events:
-        return []
-
-    grouped = []
-    author, response, thoughts = process_event(events[0])
-    if not author:
-        author = "unknown"
-
-    current_author = author
-    current_response = response or ""
-    current_thoughts = thoughts or ""
-
-    for event in events[1:]:
-        author, response, thoughts = process_event(event)
-        if not author:
-            continue
-
-        if author == current_author:
-            if response:
-                current_response += response
-            if thoughts:
-                current_thoughts += thoughts + "\n\n"
-        else:
-            grouped.append((current_author, current_response, current_thoughts))
-            current_author = author
-            current_response = response or ""
-            current_thoughts = thoughts or ""
-
-    grouped.append((current_author, current_response, current_thoughts))
-    return grouped
-
-
-def initialize_session():
-    """
-    Initializes the Streamlit session state, ensuring all required
-    keys are present.
-    """
-    if "api_key" not in st.session_state:
-        api_key = os.environ.get("GEMINI_API_KEY") or api_key_dialog()
-        if not api_key:
-            st.rerun()
-        st.session_state.api_key = api_key
-
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = str(uuid.uuid4())
-
-    if "async_bridge" not in st.session_state:
-        st.session_state.async_bridge = AsyncIteratorBridge()
-
-
-def _display_message_content(response: str | None, thoughts: str | None) -> None:
-    """Renders the content of a chat message, including response and thoughts."""
-    if response:
-        st.markdown(response, unsafe_allow_html=True)
-    if thoughts:
-        with st.expander("Show Thoughts"):
-            st.markdown(thoughts)
-
-
-def render():
-    """
-    Main rendering function for the Streamlit application.
-    """
-    with st.sidebar:
-        language, is_agent_mode = settings_form()
-        examples = load_examples(language)
-        example_title = st.selectbox("Example Prompt", [""] + list(examples.keys()))
-        example = examples.get(example_title, "")
-        if st.button("New Session", use_container_width=True):
-            if "async_bridge" in st.session_state:
-                del st.session_state.async_bridge
-            clear_talk_session()
-            st.rerun()
-
-    talk_session = get_talk_session()
-    if talk_session is None:
-        user_request = new_session_form(example)
-        if user_request:
-            talk_session = create_talk_session(
-                user_id=st.session_state.user_id,
-                session_id=str(uuid.uuid4()),
-                state={"user_request": user_request},
-            )
-            st.rerun()
-        else:
-            st.stop()
-
-    user_request = talk_session.state.get("user_request")
-
-    # Display the initial user request.
-    with st.container(height=280):
-        st.markdown(user_request)
-
-    # Display historical events, grouped by author.
-    # Skip the first event which is the user request.
-    for author, response, thoughts in group_events(talk_session.events[1:]):
-        with st.chat_message(author, avatar=AVATARS.get(author)):
-            _display_message_content(response, thoughts)
-
-    user_input = st.chat_input("Input your request")
-    if user_input:
-        with st.chat_message("user", avatar=AVATARS.get("user")):
-            st.markdown(user_input)
-    elif len(talk_session.events) == 0:
-        user_input = user_request
-
-    if user_input:
-        agent = build_agent(is_agent_mode=is_agent_mode)
-        with st.sidebar:
-            st.write(agent)
-        runner = Runner(
-            app_name=APP_NAME, agent=agent, session_service=get_session_service()
+    response_parts: list[str] = []
+    if text_chunk:
+        response_parts.append(text_chunk)
+    for tool_call in tool_calls:
+        block = render_tool_block(
+            "call", tool_call.get("name", ""), tool_call.get("args")
         )
+        if block:
+            response_parts.append(block)
+    for tool_response in tool_responses:
+        block = render_tool_block(
+            "response",
+            tool_response.get("name", ""),
+            tool_response.get("response"),
+        )
+        if block:
+            response_parts.append(block)
 
-        async def _make_iter() -> AsyncIterator[Event]:
-            return runner.run_async(
-                user_id=talk_session.user_id,
-                session_id=talk_session.id,
-                new_message=types.Content(
-                    role="user", parts=[types.Part(text=user_input)]
-                ),
-                run_config=RunConfig(
-                    streaming_mode=StreamingMode.SSE, max_llm_calls=NORMAL_MAX_CALLS
-                ),
-            )
+    response_md = "".join(response_parts) or None
+    thoughts_md = thought_chunk or None
+    return author, response_md, thoughts_md
 
-        st.session_state.async_bridge.start_task(_make_iter)
 
-        # Live stream the agent's response, grouping messages on the fly.
-        last_author = None
-        full_response = ""
-        full_thoughts = ""
-        message_placeholder = None
-        thought_placeholder = None
-
-        for event in st.session_state.async_bridge:
-            author, response, thoughts = process_event(event)
-            if not author:
-                continue
-
-            if author != last_author:
-                last_author = author
-                full_response = ""
-                full_thoughts = ""
-                with st.chat_message(author, avatar=AVATARS.get(author)):
-                    thought_placeholder = st.empty()
-                    message_placeholder = st.empty()
-
-            if response and message_placeholder:
-                full_response += response
-                message_placeholder.markdown(full_response, unsafe_allow_html=True)
-
-            if thoughts and thought_placeholder:
-                full_thoughts += thoughts + "\n\n"
-                with thought_placeholder.container():
-                    with st.expander("Show Thoughts"):
-                        st.markdown(full_thoughts)
-
-        st.rerun()
-
-    st.write(talk_session.events)
+@st.cache_resource
+def get_worker() -> StreamWorker:
+    return StreamWorker()
 
 
 def main():
-    st.set_page_config(page_title="remip-example", layout="wide")
-    initialize_session()
-    render()
+    st.set_page_config(page_title="ReMIP", page_icon="🎓")
+    st.title("ReMIP")
+
+    if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+        st.error("No API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
+        st.stop()
+
+    ss = st.session_state
+    if "worker" not in ss:
+        ss.worker = get_worker()
+        ss.live_text = ""
+        ss.streaming_active = False
+        ss.active_stream_id = None
+        ss.thought_text = ""
+        ss.tool_markdown = ""
+
+    ss.live_text = ss.get("live_text", "")
+    ss.streaming_active = ss.get("streaming_active", False)
+    ss.active_stream_id = ss.get("active_stream_id", None)
+    ss.thought_text = ss.get("thought_text", "")
+    ss.tool_markdown = ss.get("tool_markdown", "")
+
+    history_events: list[Event] = []
+    try:
+        history_events = ss.worker.get_history_messages()
+    except Exception:
+        history_events = []
+
+    for event in history_events:
+        text_chunk, thought_chunk, tool_calls, tool_responses = extract_event_fragments(
+            event
+        )
+        if not (text_chunk or thought_chunk or tool_calls or tool_responses):
+            continue
+
+        author = getattr(event, "author", None) or getattr(
+            getattr(event, "content", None), "role", None
+        )
+        chat_role = "user" if author == "user" else "assistant"
+        with st.chat_message(chat_role, avatar=AVATARS.get(author)):
+            if author not in ("user", "assistant", None):
+                st.caption(author)
+            if text_chunk:
+                st.markdown(text_chunk)
+            for tool_call in tool_calls:
+                block = render_tool_block(
+                    "call", tool_call.get("name", ""), tool_call.get("args")
+                )
+                if block:
+                    st.markdown(block, unsafe_allow_html=True)
+            for tool_response in tool_responses:
+                block = render_tool_block(
+                    "response",
+                    tool_response.get("name", ""),
+                    tool_response.get("response"),
+                )
+                if block:
+                    st.markdown(block, unsafe_allow_html=True)
+            if thought_chunk:
+                thought_container = st.expander("Thinking", expanded=False)
+                thought_container.markdown(thought_chunk)
+
+    live_placeholders: Optional[dict[str, Any]] = None
+    if ss.streaming_active:
+        with st.chat_message("assistant", avatar=AVATARS.get("remip_agent")):
+            text_placeholder = st.empty()
+            if ss.live_text:
+                text_placeholder.markdown(ss.live_text)
+            tool_placeholder = st.empty()
+            if ss.tool_markdown:
+                tool_placeholder.markdown(ss.tool_markdown, unsafe_allow_html=True)
+            thought_container = st.expander("Thinking", expanded=False)
+            thought_placeholder = thought_container.empty()
+            if ss.thought_text:
+                thought_placeholder.markdown(ss.thought_text)
+            live_placeholders = {
+                "text": text_placeholder,
+                "tools": tool_placeholder,
+                "thought": thought_placeholder,
+            }
+
+    def handle_stream_event(
+        kind: str,
+        stream_id: Optional[int],
+        payload: Any,
+        placeholders: Optional[dict[str, Any]],
+    ) -> bool:
+        text_placeholder = placeholders.get("text") if placeholders else None
+        tool_placeholder = placeholders.get("tools") if placeholders else None
+        thought_placeholder = placeholders.get("thought") if placeholders else None
+
+        active_id = ss.active_stream_id
+        if active_id is not None and stream_id != active_id:
+            return False
+
+        if kind == "status":
+            return False
+
+        if kind == "reset":
+            ss.live_text = ""
+            ss.streaming_active = True
+            ss.thought_text = ""
+            ss.tool_markdown = ""
+            if text_placeholder:
+                try:
+                    text_placeholder.markdown("")
+                except Exception:
+                    pass
+            if thought_placeholder:
+                try:
+                    thought_placeholder.markdown("")
+                except Exception:
+                    pass
+            if tool_placeholder:
+                try:
+                    tool_placeholder.markdown("")
+                except Exception:
+                    pass
+            return False
+
+        if kind == "chunk":
+            ss.live_text += payload or ""
+            if text_placeholder:
+                try:
+                    text_placeholder.markdown(ss.live_text)
+                except Exception:
+                    pass
+            return False
+
+        if kind == "final_chunk":
+            if payload:
+                payload_str = payload or ""
+                if ss.live_text and payload_str.startswith(ss.live_text):
+                    ss.live_text = payload_str
+                elif ss.live_text and ss.live_text.endswith(payload_str):
+                    pass
+                else:
+                    ss.live_text += payload_str
+            if text_placeholder:
+                try:
+                    text_placeholder.markdown(ss.live_text)
+                except Exception:
+                    pass
+            return False
+
+        if kind == "thought":
+            if payload:
+                if ss.thought_text:
+                    ss.thought_text += "\n\n" + payload
+                else:
+                    ss.thought_text = payload
+            if thought_placeholder:
+                try:
+                    thought_placeholder.markdown(ss.thought_text)
+                except Exception:
+                    pass
+            return False
+
+        if kind == "function_call":
+            name = ""
+            data = None
+            if isinstance(payload, Mapping):
+                name = str(payload.get("name") or "")
+                data = payload.get("args")
+            detail = render_tool_block("call", name, data)
+            if detail:
+                ss.tool_markdown = (
+                    f"{ss.tool_markdown}{detail}" if ss.tool_markdown else detail
+                )
+                if tool_placeholder:
+                    try:
+                        tool_placeholder.markdown(
+                            ss.tool_markdown, unsafe_allow_html=True
+                        )
+                    except Exception:
+                        pass
+            return False
+
+        if kind == "function_response":
+            name = ""
+            data = None
+            if isinstance(payload, Mapping):
+                name = str(payload.get("name") or "")
+                data = payload.get("response")
+            detail = render_tool_block("response", name, data)
+            if detail:
+                ss.tool_markdown = (
+                    f"{ss.tool_markdown}{detail}" if ss.tool_markdown else detail
+                )
+                if tool_placeholder:
+                    try:
+                        tool_placeholder.markdown(
+                            ss.tool_markdown, unsafe_allow_html=True
+                        )
+                    except Exception:
+                        pass
+            return False
+
+        if kind == "final_thought":
+            if payload:
+                payload_str = payload or ""
+                if ss.thought_text and payload_str.startswith(ss.thought_text):
+                    ss.thought_text = payload_str
+                elif ss.thought_text and ss.thought_text.endswith(payload_str):
+                    pass
+                else:
+                    if ss.thought_text:
+                        ss.thought_text += "\n\n" + payload_str
+                    else:
+                        ss.thought_text = payload_str
+            if thought_placeholder:
+                try:
+                    thought_placeholder.markdown(ss.thought_text)
+                except Exception:
+                    pass
+            return False
+
+        if kind == "done":
+            if text_placeholder and ss.live_text:
+                try:
+                    text_placeholder.markdown(ss.live_text)
+                except Exception:
+                    pass
+            if thought_placeholder and ss.thought_text:
+                try:
+                    thought_placeholder.markdown(ss.thought_text)
+                except Exception:
+                    pass
+            if tool_placeholder and ss.tool_markdown:
+                try:
+                    tool_placeholder.markdown(ss.tool_markdown, unsafe_allow_html=True)
+                except Exception:
+                    pass
+            ss.streaming_active = False
+            ss.active_stream_id = None
+            return True
+
+        if kind == "error":
+            ss.streaming_active = False
+            ss.active_stream_id = None
+            if payload:
+                st.warning(payload)
+            return True
+
+        if kind == "interrupted":
+            ss.streaming_active = False
+            ss.active_stream_id = None
+            return True
+
+        return False
+
+    def drain_queue(
+        placeholders: Optional[dict[str, Any]], blocking: bool = False
+    ) -> bool:
+        completed = False
+        while True:
+            try:
+                if blocking:
+                    item = ss.worker.out_q.get(timeout=0.2)
+                else:
+                    item = ss.worker.out_q.get_nowait()
+            except queue.Empty:
+                break
+
+            if len(item) == 3:
+                kind, stream_id, payload = item
+            else:
+                kind = item[0]
+                stream_id = ss.active_stream_id
+                payload = item[1] if len(item) > 1 else None
+
+            completed = (
+                handle_stream_event(kind, stream_id, payload, placeholders) or completed
+            )
+
+            if blocking and completed:
+                break
+        return completed
+
+    def trigger_prompt(prompt_text: str) -> None:
+        with st.chat_message("user", avatar=AVATARS.get("user")):
+            st.markdown(prompt_text)
+
+        with st.chat_message("assistant", avatar=AVATARS.get("remip_agent")):
+            text_placeholder = st.empty()
+            tool_placeholder = st.empty()
+            thought_container = st.expander("Thinking", expanded=False)
+            thought_placeholder = thought_container.empty()
+            placeholders = {
+                "text": text_placeholder,
+                "tools": tool_placeholder,
+                "thought": thought_placeholder,
+            }
+
+        stream_id = ss.worker.start_stream(prompt_text)
+        ss.active_stream_id = stream_id
+        ss.live_text = ""
+        ss.thought_text = ""
+        ss.tool_markdown = ""
+        ss.streaming_active = True
+
+        timeout_str = os.getenv("REMIP_STREAM_TIMEOUT", "0").strip()
+        try:
+            timeout_sec = float(timeout_str)
+        except ValueError:
+            timeout_sec = 0.0
+        deadline = time.time() + timeout_sec if timeout_sec > 0 else None
+        while True:
+            completed = drain_queue(placeholders, blocking=True)
+            if completed or not ss.streaming_active:
+                break
+            if deadline and time.time() > deadline:
+                logger.warning(
+                    "UI drain loop hit timeout (%.1fs) for stream %s; leaving streaming_active=True",
+                    timeout_sec,
+                    stream_id,
+                )
+                break
+
+        drain_queue(placeholders, blocking=False)
+
+    drain_queue(live_placeholders, blocking=False)
+
+    selected_example_prompt = None
+    examples = load_examples("ja")
+    if examples:
+        with st.sidebar:
+            st.subheader("Example Problems")
+            titles = ["(Manual input)"] + list(examples.keys())
+            selected_title = st.selectbox(
+                "Choose an example",
+                titles,
+                key="example_selector",
+            )
+            if selected_title and selected_title != "(Manual input)":
+                example_content = examples[selected_title]
+                if st.button(
+                    "Use this example",
+                    use_container_width=True,
+                    key="use_selected_example",
+                ):
+                    selected_example_prompt = example_content
+                with st.expander("Preview", expanded=True):
+                    st.markdown(example_content)
+
+    prompt = st.chat_input("Type a message (new input interrupts current generation)")
+
+    if selected_example_prompt:
+        trigger_prompt(selected_example_prompt)
+    elif prompt:
+        trigger_prompt(prompt)
 
 
 if __name__ == "__main__":

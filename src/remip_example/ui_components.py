@@ -15,7 +15,7 @@ def load_examples(language: str = "ja"):
             contents = f.readlines()
         if contents:
             # Use the first line (title) as the key
-            examples[contents[0].strip()] = "".join(contents)
+            examples[contents[0][2:].strip()] = "".join(contents)
     return examples
 
 

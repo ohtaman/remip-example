@@ -1,16 +1,18 @@
 """Utility functions for the remip-sample application."""
 
-import tarfile
-import urllib.request
-import pathlib
-import socket
-import time
-import subprocess
 import atexit
 import os
+import pathlib
 import signal
+import socket
+import subprocess
+import tarfile
+import time
+import urllib.request
 
 import streamlit as st
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
 from remip_example.config import MCP_PORT
 
@@ -74,6 +76,48 @@ def start_remip_mcp() -> int:
 
     wait_for_port("localhost", port)
     return port
+
+
+@st.cache_resource
+def start_remip() -> int:
+    port = 9999
+    proc = subprocess.Popen(
+        f"uvx remip --port {port}",
+        shell=True,
+        start_new_session=True,
+    )
+
+    global _mcp_server_process
+    _mcp_server_process = proc
+    atexit.register(_cleanup_mcp_server_group)
+
+    wait_for_port("localhost", port)
+    return port
+
+
+@st.cache_resource
+def get_mcp_toolset() -> McpToolset:
+    """Starts the MCP server and returns a cached toolset instance."""
+    port = start_remip_mcp()
+    # port = start_remip()
+    # # print(port)
+    # return McpToolset(
+    #     connection_params=StdioConnectionParams(
+    #         server_params=StdioServerParameters(
+    #             command="npx",
+    #             args=["-y", "github:ohtaman/remip-mcp", "--remip-host", "localhost", "--remip-port", f"{port}"],
+    #         ),
+    #     )
+    # )
+    toolset = McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=f"http://localhost:{port}/mcp/",
+            timeout=30,
+            terminate_on_close=False,
+        ),
+    )
+    print("TOOLSET", id(toolset))
+    return toolset
 
 
 def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:
