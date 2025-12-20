@@ -102,6 +102,7 @@ def build_agent(
         model=REMIP_AGENT_MODEL,
         description="Agent to judge whether to continue",
         instruction=MENTOR_AGENT_INSTRUCTION,
+        include_contents="none",
         planner=BuiltInPlanner(
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True,

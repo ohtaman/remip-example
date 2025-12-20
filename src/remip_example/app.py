@@ -1,6 +1,4 @@
-"""Streamlit LoopAgent application with enhanced tool visibility."""
-
-from __future__ import annotations
+# from __future__ import annotations
 
 import os
 import time
@@ -44,87 +42,6 @@ APP_NAME = "agents"  # Align with ADK's default app name
 USER_ID = "demo-user-001"
 
 AVATARS = {"remip_agent": "🦸", "mentor_agent": "🧚", "user": None}
-
-LOOP_STATE_LABELS = {
-    "starting": "Booting loop",
-    "handover_wait": "Finishing previous turn",
-    "worker": "Agent iterating",
-    "mentor": "Mentor reviewing",
-    "planner": "Planning next step",
-    "running": "Generating answer",
-    "completed": "Completed",
-    "interrupted": "Interrupted",
-    "error": "Error",
-}
-
-LOOP_STATUS_CSS = """
-<style>
-.loop-status {
-    display: flex;
-    align-items: center;
-    gap: 0.8rem;
-    margin-bottom: 0.75rem;
-    padding: 0.65rem 0.95rem;
-    border-radius: 0.85rem;
-    border: 1px solid rgba(94, 105, 155, 0.35);
-    background: rgba(76, 110, 245, 0.08);
-}
-.loop-status__spinner,
-.loop-status__icon {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-}
-.loop-status__spinner {
-    border: 2.6px solid rgba(112, 131, 190, 0.25);
-    border-top-color: #4c6ef5;
-    animation: loop-status-spin 0.85s linear infinite;
-}
-.loop-status__icon {
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: #ffffff;
-    background: #4c6ef5;
-}
-.loop-status__icon--done {
-    background: #2b8a3e;
-}
-.loop-status__icon--error {
-    background: #e03131;
-}
-.loop-status__icon--paused {
-    background: #f08c00;
-}
-.loop-status__body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    min-width: 0;
-}
-.loop-status__stage {
-    font-weight: 600;
-    font-size: 0.95rem;
-    line-height: 1.2;
-}
-.loop-status__meta {
-    font-size: 0.78rem;
-    opacity: 0.85;
-    line-height: 1.3;
-}
-.loop-status__meta span + span::before {
-    content: "·";
-    margin: 0 0.35rem;
-    opacity: 0.65;
-}
-@keyframes loop-status-spin {
-    to { transform: rotate(360deg); }
-}
-</style>
-"""
 
 # ------------------- Silence teardown noise (cosmetic only) -------------------
 logging.getLogger("mcp.client.stdio").setLevel(logging.ERROR)
@@ -344,7 +261,6 @@ def _summarize_event(event: Event) -> str:
     if isinstance(metadata, Mapping):
         for key in (
             "loop_action",
-            "loop_state",
             "iteration",
             "mentor_decision",
             "reason",
@@ -546,11 +462,7 @@ class StreamWorker:
                     )
                 status_payload = self._build_status_payload(event)
                 if status_payload:
-                    status_payload["state"] = (
-                        status_payload.get("state")
-                        or status_payload.get("loop_state")
-                        or "running"
-                    )
+                    status_payload["state"] = status_payload.get("state") or "running"
                     self.out_q.put(("status", stream_id, status_payload))
                 if self._interrupt_flag or stream_id != self._current_stream_id:
                     self._log.info(
@@ -740,7 +652,6 @@ class StreamWorker:
         payload: dict[str, Any] = {}
         if isinstance(metadata, Mapping):
             for key in (
-                "loop_state",
                 "loop_action",
                 "iteration",
                 "mentor_decision",
@@ -767,16 +678,6 @@ class StreamWorker:
             payload["final"] = bool(event.is_final_response())
         except Exception:
             payload["final"] = False
-
-        loop_state = payload.get("loop_state")
-        if loop_state:
-            payload["state"] = loop_state
-        elif agent_name == "mentor_agent":
-            payload["state"] = "mentor"
-        elif agent_name == "remip_agent":
-            payload["state"] = "worker"
-        else:
-            payload.setdefault("state", "running")
 
         return payload if payload else None
 
@@ -916,139 +817,19 @@ def main():
         st.stop()
 
     ss = st.session_state
-    if not ss.get("loop_status_css_applied"):
-        st.markdown(LOOP_STATUS_CSS, unsafe_allow_html=True)
-        ss.loop_status_css_applied = True
     if "worker" not in ss:
         ss.worker = get_worker()
         ss.live_text = ""
         ss.streaming_active = False
         ss.active_stream_id = None
         ss.thought_text = ""
-        ss.loop_status = {}
         ss.tool_markdown = ""
 
     ss.live_text = ss.get("live_text", "")
     ss.streaming_active = ss.get("streaming_active", False)
     ss.active_stream_id = ss.get("active_stream_id", None)
     ss.thought_text = ss.get("thought_text", "")
-    ss.loop_status = ss.get("loop_status", {})
     ss.tool_markdown = ss.get("tool_markdown", "")
-
-    status_placeholder = st.empty()
-
-    def render_loop_status() -> None:
-        info = ss.loop_status if isinstance(ss.loop_status, Mapping) else {}
-        if not info:
-            status_placeholder.empty()
-            return
-
-        def _truncate(value: str, limit: int = 180) -> str:
-            value = value.strip()
-            if len(value) <= limit:
-                return value
-            return value[: limit - 1] + "…"
-
-        def _icon_for_state(key: str) -> tuple[str, str]:
-            base = "loop-status__icon"
-            if key in ("completed", "done"):
-                return "✓", f"{base} loop-status__icon--done"
-            if key in ("error", "failed"):
-                return "!", f"{base} loop-status__icon--error"
-            if key in ("interrupted", "paused"):
-                return "⏸", f"{base} loop-status__icon--paused"
-            return "•", base
-
-        state = str(info.get("state") or info.get("loop_state") or "").strip()
-        label_key = info.get("loop_state") or state or "running"
-        label = LOOP_STATE_LABELS.get(
-            label_key, label_key.replace("_", " ").title() if label_key else "Working"
-        )
-        show_spinner = ss.streaming_active and state not in (
-            "completed",
-            "error",
-            "interrupted",
-        )
-        if state in ("completed", "error", "interrupted"):
-            show_spinner = False
-
-        meta_bits: list[str] = []
-        iteration = info.get("iteration")
-        if iteration not in (None, ""):
-            meta_bits.append(f"Iteration {iteration}")
-        agent = info.get("agent") or info.get("role")
-        if agent:
-            meta_bits.append(str(agent))
-        action = info.get("loop_action") or info.get("status")
-        if action:
-            meta_bits.append(str(action))
-        waiting_for = info.get("waiting_for")
-        if waiting_for not in (None, ""):
-            meta_bits.append(f"Waiting for stream {waiting_for}")
-
-        detail_lines: list[str] = []
-        mentor_decision = info.get("mentor_decision")
-        if mentor_decision:
-            detail_lines.append(f"Mentor: {mentor_decision}")
-        for key in ("reason", "message", "error"):
-            val = info.get(key)
-            if val:
-                detail_lines.append(str(val))
-
-        meta_segments: list[str] = []
-        if meta_bits:
-            meta_segments.append(html.escape(" · ".join(str(bit) for bit in meta_bits)))
-        for line in detail_lines:
-            trimmed = _truncate(str(line))
-            if trimmed:
-                meta_segments.append(html.escape(trimmed))
-
-        meta_html = "<br/>".join(meta_segments)
-        label_html = html.escape(label or "Working")
-
-        if show_spinner:
-            icon_html = '<div class="loop-status__spinner"></div>'
-        else:
-            icon_symbol, icon_class = _icon_for_state(state or label_key)
-            icon_html = f'<div class="{icon_class}">{html.escape(icon_symbol)}</div>'
-
-        meta_block = (
-            f'<div class="loop-status__meta">{meta_html}</div>' if meta_html else ""
-        )
-        status_placeholder.markdown(
-            f"""
-            <div class="loop-status">
-                {icon_html}
-                <div class="loop-status__body">
-                    <div class="loop-status__stage">{label_html}</div>
-                    {meta_block}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    def update_loop_status(data: Any, *, overwrite: bool = False) -> None:
-        if overwrite:
-            updated: dict[str, Any] = {}
-        else:
-            updated = (
-                dict(ss.loop_status) if isinstance(ss.loop_status, Mapping) else {}
-            )
-        if data is None:
-            updated = {}
-        elif isinstance(data, Mapping):
-            for key, value in data.items():
-                if value is None:
-                    updated.pop(key, None)
-                else:
-                    updated[key] = value
-        else:
-            updated["message"] = str(data)
-        ss.loop_status = updated
-        render_loop_status()
-
-    render_loop_status()
 
     history_events: list[Event] = []
     try:
@@ -1124,7 +905,6 @@ def main():
             return False
 
         if kind == "status":
-            update_loop_status(payload)
             return False
 
         if kind == "reset":
@@ -1132,7 +912,6 @@ def main():
             ss.streaming_active = True
             ss.thought_text = ""
             ss.tool_markdown = ""
-            update_loop_status({"state": "running"}, overwrite=True)
             if text_placeholder:
                 try:
                     text_placeholder.markdown("")
@@ -1265,13 +1044,11 @@ def main():
                     pass
             ss.streaming_active = False
             ss.active_stream_id = None
-            update_loop_status({"state": "completed"}, overwrite=False)
             return True
 
         if kind == "error":
             ss.streaming_active = False
             ss.active_stream_id = None
-            update_loop_status({"state": "error"}, overwrite=False)
             if payload:
                 st.warning(payload)
             return True
@@ -1279,7 +1056,6 @@ def main():
         if kind == "interrupted":
             ss.streaming_active = False
             ss.active_stream_id = None
-            update_loop_status({"state": "interrupted"}, overwrite=False)
             return True
 
         return False
@@ -1333,14 +1109,6 @@ def main():
         ss.thought_text = ""
         ss.tool_markdown = ""
         ss.streaming_active = True
-        update_loop_status(
-            {
-                "state": "starting",
-                "agent": "remip_agent",
-                "message": "Preparing new loop run…",
-            },
-            overwrite=True,
-        )
 
         timeout_str = os.getenv("REMIP_STREAM_TIMEOUT", "0").strip()
         try:
