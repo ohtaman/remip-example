@@ -2077,7 +2077,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21.0" },
     { name = "anyio", specifier = ">=4.4.0" },
-    { name = "google-adk", specifier = ">=1.21.0" },
+    { name = "google-adk", specifier = ">=1.14.1" },
     { name = "mcp", specifier = ">=1.13.1" },
     { name = "nest-asyncio", specifier = ">=1.6.0" },
     { name = "pandas", specifier = ">=2.3.2" },

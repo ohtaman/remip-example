@@ -585,17 +585,14 @@ def get_worker() -> StreamWorker:
 
 
 def init():
+    ss = st.session_state
     # Check if API key is set
-    if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
-        api_key = api_key_dialog()
-        if api_key:
-            os.environ["GEMINI_API_KEY"] = api_key
-        else:
-            st.error("No API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
-            st.stop()
+    if "api_key" not in ss or not ss.api_key:
+        ss.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not ss.api_key:
+            api_key_dialog()
 
     # Initialize session state
-    ss = st.session_state
     if "worker" not in ss:
         ss.worker = get_worker()
         ss.live_text = ""
