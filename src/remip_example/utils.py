@@ -99,16 +99,6 @@ def start_remip() -> int:
 def get_mcp_toolset() -> McpToolset:
     """Starts the MCP server and returns a cached toolset instance."""
     port = start_remip_mcp()
-    # port = start_remip()
-    # # print(port)
-    # return McpToolset(
-    #     connection_params=StdioConnectionParams(
-    #         server_params=StdioServerParameters(
-    #             command="npx",
-    #             args=["-y", "github:ohtaman/remip-mcp", "--remip-host", "localhost", "--remip-port", f"{port}"],
-    #         ),
-    #     )
-    # )
     toolset = McpToolset(
         connection_params=StreamableHTTPConnectionParams(
             url=f"http://localhost:{port}/mcp/",
@@ -120,6 +110,7 @@ def get_mcp_toolset() -> McpToolset:
     return toolset
 
 
+@st.cache_resource
 def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:
     base_path = pathlib.Path.cwd() / install_dir
     node_path = base_path / f"node-v{version}-linux-x64"
@@ -137,3 +128,40 @@ def ensure_node(version: str = "24.8.0", install_dir: str = ".node") -> str:
             f.extractall(base_path)
 
     return bin_path.absolute()
+
+
+@st.cache_resource
+def ensure_http_server(port: int = 3333) -> int:
+    """
+    Start the MCP server (HTTP mode) once per Streamlit session, and keep it alive
+    across reruns. It will be terminated by the atexit handler when the process exits.
+    """
+    proc = subprocess.Popen(
+        [
+            "npx",
+            "-y",
+            "github:ohtaman/remip-mcp",
+            "--http",
+            "--start-remip-server",
+            "--port",
+            str(port),
+        ],
+        start_new_session=True,
+    )
+
+    def _cleanup():
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait()
+            except Exception:
+                pass
+
+    atexit.register(_cleanup)
+
+    if not wait_for_port("127.0.0.1", port, timeout=10.0):
+        raise RuntimeError(f"MCP HTTP server failed to start on port {port}")
+    return port

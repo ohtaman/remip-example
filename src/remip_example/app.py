@@ -6,11 +6,7 @@ import json
 import queue
 import asyncio
 import threading
-import subprocess
 import atexit
-import signal
-import socket
-import platform
 import html
 from collections.abc import Mapping
 from typing import Optional, Any, Callable, Dict
@@ -23,27 +19,21 @@ try:
 except Exception:
     _add_ctx = None
 
-from google.adk.agents import Agent, LlmAgent, LoopAgent, RunConfig
-from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents import RunConfig
 from google.adk.agents.run_config import StreamingMode
-from google.adk.planners import BuiltInPlanner
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
-from google.adk.tools import BaseTool, ToolContext, exit_loop
 from google.genai import types
 
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
-from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
 from remip_example.chat_history import build_committed_events_from_partials
-from remip_example.ui_components import load_examples
-from remip_example.utils import ensure_node
+from remip_example.config import APP_NAME, AVATARS
+from remip_example.ui_components import api_key_dialog, load_examples
+from remip_example.utils import get_mcp_toolset
+from remip_example.agent import build_agent
 
-
-APP_NAME = "agents"  # Align with ADK's default app name
 USER_ID = "demo-user-001"
-
-AVATARS = {"remip_agent": "🦸", "mentor_agent": "🧚", "user": None}
 
 # ------------------- Silence teardown noise (cosmetic only) -------------------
 logging.getLogger("mcp.client.stdio").setLevel(logging.ERROR)
@@ -66,221 +56,14 @@ logger.setLevel(getattr(logging, log_level_name, logging.INFO))
 logger.propagate = False
 
 
-# ------------------- HTTP helper: spawn + cache MCP server (port 3333) --------------------
-def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=0.2):
-                return True
-        except OSError:
-            time.sleep(0.1)
-    return False
-
-
-@st.cache_resource
-def ensure_http_server(port: int = 3333) -> int:
-    """
-    Start the MCP server (HTTP mode) once per Streamlit session, and keep it alive
-    across reruns. It will be terminated by the atexit handler when the process exits.
-    """
-    proc = subprocess.Popen(
-        [
-            "npx",
-            "-y",
-            "github:ohtaman/remip-mcp",
-            "--http",
-            "--start-remip-server",
-            "--port",
-            str(port),
-        ],
-        start_new_session=True,
-    )
-
-    def _cleanup():
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            proc.wait(timeout=5)
-        except Exception:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait()
-            except Exception:
-                pass
-
-    atexit.register(_cleanup)
-
-    if not _wait_for_port("127.0.0.1", port, timeout=10.0):
-        raise RuntimeError(f"MCP HTTP server failed to start on port {port}")
-    return port
-
-
-# ----------------------------- MCP Toolset factory ----------------------------------------
-def build_mcp_toolset() -> McpToolset:
-    port = ensure_http_server(3333)
-    return McpToolset(
-        connection_params=StreamableHTTPConnectionParams(
-            url=f"http://127.0.0.1:{port}/mcp/",
-            timeout=30,
-            terminate_on_close=True,  # HTTP session ends when toolset is closed
-        ),
-    )
-
-
-# ---------------------- LoopAgent builder (uses long-lived toolset) -----------------------
-def clear_tool_calling_track(callback_context: CallbackContext) -> None:
-    callback_context.state["tools_used"] = []
-
-
-def track_tool_calling(
-    tool: BaseTool,
-    args: dict[str, Any],
-    tool_context: ToolContext,
-    tool_response: Any,
-) -> None:
-    logger.debug(
-        "Tool call start agent=%s tool=%s args=%s",
-        tool_context.agent_name,
-        getattr(tool, "name", type(tool).__name__),
-        {
-            k: (repr(v)[:120] + "..." if len(repr(v)) > 120 else repr(v))
-            for k, v in args.items()
-        },
-    )
-    if "tools_used" not in tool_context.state:
-        tool_context.state["tools_used"] = []
-    truncated_args = {
-        k: (str(v)[:128] + "..." if len(str(v)) > 128 else str(v))
-        for k, v in args.items()
-    }
-    tool_context.state["tools_used"].append(
-        {
-            "agent": tool_context.agent_name,
-            "tool": tool.name,
-            "args": truncated_args,
-            "success": not getattr(tool_response, "isError", False),
-        }
-    )
-    logger.debug(
-        "Tool call done agent=%s tool=%s success=%s",
-        tool_context.agent_name,
-        getattr(tool, "name", type(tool).__name__),
-        not getattr(tool_response, "isError", False),
-    )
-
-
-def build_loop_agent(
-    toolset: McpToolset,
-    model: str | None = None,
-    remip_instruction: str | None = None,
-    mentor_instruction: str | None = None,
-    thinking_budget: int = 2048,
-    max_iterations: int = 50,
-) -> Agent:
-    model = model or os.getenv("REMIP_AGENT_MODEL", "gemini-2.5-flash")
-    remip_instruction = remip_instruction or os.getenv(
-        "REMIP_AGENT_INSTRUCTION",
-        "You are a mathematical optimization and coding assistant. Use tools when helpful. Be precise.",
-    )
-    mentor_instruction = mentor_instruction or os.getenv(
-        "MENTOR_AGENT_INSTRUCTION",
-        (
-            "You are a mentor/orchestrator. If the last step seems sufficient, call exit_loop. "
-            "Otherwise, briefly justify continuing and hand the work back to the remip_agent. "
-            "Never execute heavy tools yourself—do not call define_model, solve_model, or other MCP tools. "
-            "If further tool work is required, simply explain what still needs to happen."
-        ),
-    )
-
-    remip_agent = LlmAgent(
-        name="remip_agent",
-        model=model,
-        description="Agent for mathematical optimization and coding",
-        instruction=remip_instruction,
-        planner=BuiltInPlanner(
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=True, thinking_budget=thinking_budget
-            )
-        ),
-        tools=[toolset],  # MCP tool access only for the worker agent
-        output_key="work_result",
-        before_agent_callback=clear_tool_calling_track,
-        after_tool_callback=track_tool_calling,
-    )
-
-    def ask(tool_context: ToolContext):
-        return exit_loop(tool_context)
-
-    mentor_tools: list[BaseTool] = [exit_loop, ask]
-    if toolset is not None:
-        mentor_tools.append(toolset)
-
-    mentor_agent = LlmAgent(
-        name="mentor_agent",
-        model=model,
-        description="Agent that judges whether to continue the loop",
-        instruction=mentor_instruction,
-        planner=BuiltInPlanner(
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=True, thinking_budget=1024
-            )
-        ),
-        tools=mentor_tools,
-        output_key="mentor_result",
-    )
-
-    agent = LoopAgent(
-        name="orchestrator",
-        sub_agents=[remip_agent, mentor_agent],
-        max_iterations=max_iterations,
-    )
-    return agent
-
-
-def _summarize_event(event: Event) -> str:
-    parts: list[str] = []
-    event_type = getattr(event, "event_type", None) or getattr(event, "type", None)
-    if event_type:
-        parts.append(f"type={event_type}")
-    source = getattr(event, "source", None)
-    if source:
-        parts.append(f"source={source}")
-    author = getattr(event, "author", None)
-    if author and author != source:
-        parts.append(f"author={author}")
-    agent_name = getattr(event, "agent_name", None)
-    if agent_name and agent_name not in (source, author):
-        parts.append(f"agent={agent_name}")
-    if hasattr(event, "is_final_response"):
-        try:
-            parts.append(f"final={event.is_final_response()}")
-        except Exception:
-            parts.append("final=?")
-    invocation_id = getattr(event, "invocation_id", None)
-    if invocation_id:
-        parts.append(f"invocation_id={invocation_id}")
-    metadata = getattr(event, "metadata", None)
-    if isinstance(metadata, Mapping):
-        for key in (
-            "loop_action",
-            "iteration",
-            "mentor_decision",
-            "reason",
-            "status",
-        ):
-            if key in metadata:
-                value = metadata[key]
-                if isinstance(value, str) and len(value) > 80:
-                    value = value[:77] + "..."
-                parts.append(f"{key}={value}")
-    return ", ".join(parts) if parts else repr(event)
-
-
-# ------------------------ Worker that owns async lifecycle ---------------------------------
 class StreamWorker:
     """
-    One thread, one asyncio loop, one long-lived MCP toolset + Runner + Session + LoopAgent.
-    Ensures agent create/iterate/close happens in the SAME task lineage (no cross-task close).
+    Handles the async lifecycle for all agent operations.
+
+    This worker runs in its own thread with a dedicated asyncio event loop.
+    It manages a persistent MCP toolset, Runner, Session, and LoopAgent for the entire session.
+    All agent actions (create, iterate, close) are guaranteed to happen within the same task chain,
+    ensuring proper resource management and no cross-task cleanup issues.
     """
 
     def __init__(
@@ -331,8 +114,8 @@ class StreamWorker:
         return fut.result()
 
     async def _init_adk_objects(self):
-        self._toolset = build_mcp_toolset()
-        agent = build_loop_agent(self._toolset)
+        self._toolset = get_mcp_toolset()
+        agent = build_agent(is_agent_mode=True)
         svc = InMemorySessionService()
         self._session_service = svc
         self._runner = Runner(app_name=APP_NAME, agent=agent, session_service=svc)
@@ -458,10 +241,6 @@ class StreamWorker:
             self._log.debug("Stream %s run_async issued", stream_id)
 
             async for event in agen:
-                if self._debug_events:
-                    self._log.debug(
-                        "Stream %s event: %s", stream_id, _summarize_event(event)
-                    )
                 status_payload = self._build_status_payload(event)
                 if status_payload:
                     status_payload["state"] = status_payload.get("state") or "running"
@@ -525,11 +304,6 @@ class StreamWorker:
                             for ev in carry_events
                             if getattr(ev, "invocation_id", None) != inv_id
                         ]
-                    self._log.info(
-                        "Stream %s final response received: %s",
-                        stream_id,
-                        _summarize_event(event),
-                    )
 
             if not interrupted:
                 self._log.info("Stream %s completed normally", stream_id)
@@ -810,21 +584,17 @@ def get_worker() -> StreamWorker:
     return StreamWorker()
 
 
-def main():
-    if platform.processor() == "":
-        NODE_BIN_DIR = ensure_node()
-        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
-            os.environ["PATH"] = os.pathsep.join(
-                (str(NODE_BIN_DIR), os.environ.get("PATH", ""))
-            )
-
-    st.set_page_config(page_title="ReMIP", page_icon="🎓")
-    st.title("ReMIP")
-
+def init():
+    # Check if API key is set
     if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
-        st.error("No API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
-        st.stop()
+        api_key = api_key_dialog()
+        if api_key:
+            os.environ["GEMINI_API_KEY"] = api_key
+        else:
+            st.error("No API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
+            st.stop()
 
+    # Initialize session state
     ss = st.session_state
     if "worker" not in ss:
         ss.worker = get_worker()
@@ -833,12 +603,20 @@ def main():
         ss.active_stream_id = None
         ss.thought_text = ""
         ss.tool_markdown = ""
-
     ss.live_text = ss.get("live_text", "")
     ss.streaming_active = ss.get("streaming_active", False)
     ss.active_stream_id = ss.get("active_stream_id", None)
     ss.thought_text = ss.get("thought_text", "")
     ss.tool_markdown = ss.get("tool_markdown", "")
+
+
+def main():
+    st.set_page_config(page_title="ReMIP Example", page_icon="🎓")
+
+    init()
+    ss = st.session_state
+
+    st.title("ReMIP Example")
 
     history_events: list[Event] = []
     try:
