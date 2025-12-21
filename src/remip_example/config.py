@@ -14,7 +14,8 @@ MCP_PORT = 3333
 SESSION_DB_URL = "sqlite:///session.db"
 
 # --- Agent
-REMIP_AGENT_MODEL = "gemini-3-pro-preview"  # "gemini-2.5-pro"
+REMIP_AGENT_MODEL = "gemini-2.5-pro"
+# REMIP_AGENT_MODEL = "gemini-3-pro-preview"  # "gemini-2.5-pro"
 
 REMIP_AGENT_INSTRUCTION = """You are a planning & allocation specialist.
 You turn real-world business requests into concrete, implementable plans using available tools.
@@ -67,6 +68,7 @@ Hard rule:
 ### 4. Tool Usage (Strict)
 - Do NOT manually compute or simulate results.
 - Use provided tools for all calculations, assignments, and searches.
+- Before making any Tool Call, you MUST explain to the user in plain language why you want to use that Tool.
 
 ### 5. Code Presentation (Strict)
 - Any Python code MUST be inside a Markdown code block.
