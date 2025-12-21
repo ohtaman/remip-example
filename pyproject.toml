@@ -32,3 +32,6 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.14.1",
 ]
+
+[tool.hatch.build.targets.wheel]
+force-include = { "examples" = "remip_example/examples" }

@@ -29,13 +29,13 @@ def settings_form():
     return language, is_agent_mode
 
 
-@st.dialog("GEMINI API KEY")
-def api_key_dialog() -> str | None:
+@st.dialog("GEMINI API KEY", dismissible=False)
+def api_key_dialog():
     """Renders a dialog to input the Gemini API Key."""
     api_key = st.text_input("Gemini API Key", type="password")
     if st.button("Submit"):
-        return api_key
-    return None
+        st.session_state.api_key = api_key
+        st.rerun()
 
 
 def new_session_form(example: str | None):
