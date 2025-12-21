@@ -1,8 +1,31 @@
+import os
+
 import streamlit as st
+
+from remip_example.ui_components import api_key_dialog
+
+
+class AgentWorker:
+    pass
+
+
+def init():
+    if "api_key" not in st.session_state:
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            api_key_dialog()
+        else:
+            st.session_state.api_key = api_key
 
 
 def main():
-    st.title("ReMIP Example")
+    init()
+
+    st.set_page_config(page_title="ReMIP Example", page_icon="🎓")
+    with st.sidebar:
+        st.title("hoge")
+
+    # agent = build_agent()
 
 
 if __name__ == "__main__":
