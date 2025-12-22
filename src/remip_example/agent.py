@@ -61,7 +61,15 @@ def track_tool_calling(
     )
 
 
-# @st.cache_resource
+def prepare_user_input(callback_context: CallbackContext) -> None:
+    """ユーザー入力をステートに保存してテンプレートでアクセス可能にする"""
+    if callback_context.user_content and callback_context.user_content.parts:
+        user_text = callback_context.user_content.parts[0].text or ""
+        callback_context.state["user_input"] = user_text
+    else:
+        callback_context.state["user_input"] = ""
+
+
 def build_agent(
     is_agent_mode: bool = True,
     max_iterations: int = 50,
@@ -111,8 +119,9 @@ def build_agent(
                 thinking_budget=1024,
             )
         ),
-        tools=[exit_loop, ask],  # , get_mcp_toolset()],
+        tools=[exit_loop, ask],
         output_key="mentor_result",
+        before_agent_callback=prepare_user_input,
     )
 
     agent = LoopAgent(

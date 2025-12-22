@@ -253,7 +253,7 @@ def select_example():
         sorted(list(examples.keys())) + ["<自分で問題を記入する>"],
     )
 
-    if st.button("New Session", use_container_width=True):
+    if st.button("Use this Example Prompt", use_container_width=True):
         st.session_state.initial_prompt = examples.get(selected_title)
         if "worker" in st.session_state.conversation_session:
             st.session_state.conversation_session["worker"].stop()

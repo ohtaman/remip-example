@@ -15,20 +15,20 @@ from remip_example.agent import (
 
 def test_build_agent_not_agent_mode():
     """Test that build_agent returns a single LlmAgent when is_agent_mode is False."""
-    agent = build_agent(is_agent_mode=False)
+    agent = build_agent(is_agent_mode=False, api_key="dummy_api_key")
     assert isinstance(agent, LlmAgent)
     assert agent.name == "remip_agent"
 
 
 def test_build_agent_agent_mode():
     """Test that build_agent returns a LoopAgent when is_agent_mode is True."""
-    agent = build_agent(is_agent_mode=True)
+    agent = build_agent(is_agent_mode=True, api_key="dummy_api_key")
     assert isinstance(agent, LoopAgent)
 
 
 def test_build_agent_loop_composition():
     """Test that the LoopAgent contains the correct mentor and worker agents."""
-    agent = build_agent(is_agent_mode=True)
+    agent = build_agent(is_agent_mode=True, api_key="dummy_api_key")
     assert agent.sub_agents[0].name == "remip_agent"
     assert agent.sub_agents[1].name == "mentor_agent"
 
