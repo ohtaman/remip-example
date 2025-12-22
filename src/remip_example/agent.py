@@ -1,14 +1,14 @@
 """Agent-building logic for the remip-example application."""
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
 from google.adk.agents import Agent, LlmAgent, LoopAgent
+from google.adk.models import Gemini
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools import BaseTool, ToolContext, exit_loop
-from google.genai import types
+from google.genai import Client, types
 from mcp.types import CallToolResult
 
 
@@ -61,7 +61,15 @@ def track_tool_calling(
     )
 
 
-# @st.cache_resource
+def prepare_user_input(callback_context: CallbackContext) -> None:
+    """ユーザー入力をステートに保存してテンプレートでアクセス可能にする"""
+    if callback_context.user_content and callback_context.user_content.parts:
+        user_text = callback_context.user_content.parts[0].text or ""
+        callback_context.state["user_input"] = user_text
+    else:
+        callback_context.state["user_input"] = ""
+
+
 def build_agent(
     is_agent_mode: bool = True,
     max_iterations: int = 50,
@@ -69,8 +77,11 @@ def build_agent(
     api_key: str | None = None,
 ) -> Agent:
     """Builds the appropriate agent based on the selected mode."""
-    if api_key is not None:
-        os.environ["GEMINI_API_KEY"] = api_key
+    api_client = Client(api_key=api_key)
+    llm_model = Gemini(
+        model=REMIP_AGENT_MODEL,
+    )
+    llm_model.api_client = api_client
 
     def ask(tool_context: ToolContext):
         """Ask the user for additional information or confirmation."""
@@ -78,7 +89,7 @@ def build_agent(
 
     remip_agent = LlmAgent(
         name="remip_agent",
-        model=REMIP_AGENT_MODEL,
+        model=llm_model,
         description="Agent for mathematical optimization",
         instruction=REMIP_AGENT_INSTRUCTION,
         planner=BuiltInPlanner(
@@ -98,7 +109,7 @@ def build_agent(
 
     mentor_agent = LlmAgent(
         name="mentor_agent",
-        model=REMIP_AGENT_MODEL,
+        model=llm_model,
         description="Agent to judge whether to continue",
         instruction=MENTOR_AGENT_INSTRUCTION,
         include_contents="none",
@@ -108,8 +119,9 @@ def build_agent(
                 thinking_budget=1024,
             )
         ),
-        tools=[exit_loop, ask],  # , get_mcp_toolset()],
+        tools=[exit_loop, ask],
         output_key="mentor_result",
+        before_agent_callback=prepare_user_input,
     )
 
     agent = LoopAgent(
