@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import platform
 from queue import Empty, Queue
 import re
 import threading
@@ -21,7 +20,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from remip_example.agent import build_agent
 from remip_example.config import APP_NAME, AVATARS
-from remip_example.utils import ensure_node, load_examples
+from remip_example.utils import load_examples
 
 
 class BackgroundAgentRunner:
@@ -231,14 +230,6 @@ def group_events(events: list[Event]) -> list[tuple[str, str, str, bool]]:
 
 
 def init():
-    # Maybe Streamlit Community Cloud
-    if platform.processor() == "":
-        NODE_BIN_DIR = ensure_node()
-        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
-            os.environ["PATH"] = os.pathsep.join(
-                (str(NODE_BIN_DIR), os.environ.get("PATH", ""))
-            )
-
     if "user_id" not in st.session_state:
         st.session_state.user_id = str(uuid.uuid4())
 
@@ -281,16 +272,6 @@ def main():
     st.set_page_config(page_title="ReMIP Example", page_icon="🎓")
 
     with st.sidebar:
-        if not os.environ.get("GOOGLE_API_KEY") and not os.environ.get(
-            "GEMINI_API_KEY"
-        ):
-            st.session_state.api_key = st.text_input("Gemini API Key", type="password")
-            st.markdown(
-                "[GEMINI API KEY](https://aistudio.google.com/app/api-keys) を取得して設定してください。"
-            )
-
-        select_example()
-
         with st.expander("デモについて", expanded=True):
             st.markdown(f"""
             数理最適化MCPを使って与えられた問題を自律的に解くデモです。以下の2人のエージェントで、ユーザーリクエストを満たすまで試行錯誤します。
@@ -300,6 +281,16 @@ def main():
             - {AVATARS["mentor_agent"]}: **メンターエージェント**
               - 結果を確認してユーザーニーズを満たすか判断する
             """)
+
+        if not os.environ.get("GOOGLE_API_KEY") and not os.environ.get(
+            "GEMINI_API_KEY"
+        ):
+            st.session_state.api_key = st.text_input("Gemini API Key", type="password")
+            st.markdown(
+                "[GEMINI API KEY](https://aistudio.google.com/app/api-keys) を取得して設定してください。"
+            )
+
+        select_example()
 
     if not st.session_state.conversation_session:
         with st.form("Query"):
