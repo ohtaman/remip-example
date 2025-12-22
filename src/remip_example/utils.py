@@ -19,8 +19,15 @@ from remip_example.config import MCP_PORT, EXAMPLES_DIR
 
 def load_examples(language: str = "ja"):
     """Loads example prompts from the specified language directory."""
-    examples_dir: pathlib.Path = pathlib.Path(EXAMPLES_DIR) / language
+    module_dir = pathlib.Path(__file__).parent
+    examples_base_dir = module_dir / EXAMPLES_DIR
+    examples_dir: pathlib.Path = examples_base_dir / language
+
     examples = {}
+    if not examples_dir.exists():
+        print(f"Warning: Examples directory not found at {examples_dir}")
+        return {}  # Return empty if not found
+
     for path in examples_dir.glob("*.md"):
         with open(path, "r", encoding="utf-8") as f:
             contents = f.readlines()
