@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import platform
 from queue import Empty, Queue
 import re
 import threading
@@ -20,17 +21,17 @@ from streamlit_autorefresh import st_autorefresh
 
 from remip_example.agent import build_agent
 from remip_example.config import APP_NAME, AVATARS
-from remip_example.utils import load_examples
+from remip_example.utils import ensure_node, load_examples
 
 
-class Worker:
+class BackgroundAgentRunner:
     def __init__(self, user_id: str, api_key: str):
         self._user_id = user_id
         self._api_key = api_key
         self._session_service = None
         self._event_history = []
         self._stop = threading.Event()
-        self._new_message = threading.Event()
+        self._interrupt = threading.Event()
         self._input_queue = Queue[Content]()
         self._thread = threading.Thread(
             target=self._run,
@@ -72,7 +73,7 @@ class Worker:
                     new_message=message,
                     run_config=self._run_config,
                 )
-                self._new_message.clear()
+                self._interrupt.clear()
                 async for event in agen:
                     # Append new message manualy
                     if invocation_id is None:
@@ -87,8 +88,8 @@ class Worker:
                     self._event_history.append(event)
                     if self._stop.is_set():
                         break
-                    if self._new_message.is_set():
-                        self._new_message.clear()
+                    if self._interrupt.is_set():
+                        self._interrupt.clear()
                         break
                 self._input_queue.task_done()
             except Empty:
@@ -96,17 +97,19 @@ class Worker:
 
     def add_message(self, message: Content):
         self._input_queue.put(message)
-        self._new_message.set()
+        self._interrupt.set()
 
-    def get_event_history(self):
-        return self._event_history
+    def get_event_history(self) -> list[Event]:
+        return list[Event](self._event_history)
 
     def stop(self):
         self._stop.set()
 
 
 def create_conversation_session(initial_prompt: str) -> dict[any]:
-    worker = Worker(user_id=st.session_state.user_id, api_key=st.session_state.api_key)
+    worker = BackgroundAgentRunner(
+        user_id=st.session_state.user_id, api_key=st.session_state.api_key
+    )
     worker.run(Content(role="user", parts=[Part(text=initial_prompt)]))
 
     session = {
@@ -228,6 +231,14 @@ def group_events(events: list[Event]) -> list[tuple[str, str, str, bool]]:
 
 
 def init():
+    # Maybe Streamlit Community Cloud
+    if platform.processor() == "":
+        NODE_BIN_DIR = ensure_node()
+        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
+            os.environ["PATH"] = os.pathsep.join(
+                (str(NODE_BIN_DIR), os.environ.get("PATH", ""))
+            )
+
     if "user_id" not in st.session_state:
         st.session_state.user_id = str(uuid.uuid4())
 
@@ -270,8 +281,13 @@ def main():
     st.set_page_config(page_title="ReMIP Example", page_icon="🎓")
 
     with st.sidebar:
-        if not os.environ["GOOGLE_API_KEY"] and not os.environ["GEMINI_API_KEY"]:
+        if not os.environ.get("GOOGLE_API_KEY") and not os.environ.get(
+            "GEMINI_API_KEY"
+        ):
             st.session_state.api_key = st.text_input("Gemini API Key", type="password")
+            st.markdown(
+                "[GEMINI API KEY](https://aistudio.google.com/app/api-keys) を取得して設定してください。"
+            )
 
         select_example()
 
