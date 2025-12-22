@@ -15,7 +15,7 @@ SESSION_DB_URL = "sqlite:///session.db"
 
 # --- Agent
 REMIP_AGENT_MODEL = "gemini-2.5-pro"
-# REMIP_AGENT_MODEL = "gemini-3-pro-preview"  # "gemini-2.5-pro"
+# REMIP_AGENT_MODEL = "gemini-3-pro-preview"
 
 REMIP_AGENT_INSTRUCTION = """You are a planning & allocation specialist.
 You turn real-world business requests into concrete, implementable plans using available tools.
@@ -127,12 +127,6 @@ Hard rule:
 - risks
 - next steps
 - assumptions
-- iteration log (see below)
-
-**Iteration Log:**
-- Iteration 0 (Baseline): rules included, result summary
-- Iteration 1: added rule group, what changed, feasibility
-- Iteration 2: ...
 
 **Recovery Log (only if needed):**
 - Which rules conflicted (as observed by temporary exceptions)
