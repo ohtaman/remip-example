@@ -14,7 +14,20 @@ import streamlit as st
 from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
-from remip_example.config import MCP_PORT
+from remip_example.config import MCP_PORT, EXAMPLES_DIR
+
+
+def load_examples(language: str = "ja"):
+    """Loads example prompts from the specified language directory."""
+    examples_dir: pathlib.Path = pathlib.Path(EXAMPLES_DIR) / language
+    examples = {}
+    for path in examples_dir.glob("*.md"):
+        with open(path, "r", encoding="utf-8") as f:
+            contents = f.readlines()
+        if contents:
+            # Use the first line (title) as the key
+            examples[contents[0][2:].strip()] = "".join(contents)
+    return examples
 
 
 def wait_for_port(
@@ -95,7 +108,6 @@ def start_remip() -> int:
     return port
 
 
-@st.cache_resource
 def get_mcp_toolset() -> McpToolset:
     """Starts the MCP server and returns a cached toolset instance."""
     port = start_remip_mcp()
@@ -106,7 +118,6 @@ def get_mcp_toolset() -> McpToolset:
             terminate_on_close=False,
         ),
     )
-    print("TOOLSET", id(toolset))
     return toolset
 
 
