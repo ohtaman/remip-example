@@ -250,7 +250,7 @@ def select_example():
     examples = load_examples()
     selected_title = st.selectbox(
         "Choose an example",
-        ["自由記述"] + sorted(list(examples.keys())),
+        sorted(list(examples.keys())) + ["<自分で問題を記入する>"],
     )
 
     if st.button("New Session", use_container_width=True):
@@ -272,7 +272,7 @@ def main():
     st.set_page_config(page_title="ReMIP Example", page_icon="🎓")
 
     with st.sidebar:
-        with st.expander("デモについて", expanded=True):
+        with st.expander("このデモについて", expanded=False):
             st.markdown(f"""
             数理最適化MCPを使って与えられた問題を自律的に解くデモです。以下の2人のエージェントで、ユーザーリクエストを満たすまで試行錯誤します。
 
@@ -285,9 +285,9 @@ def main():
         if not os.environ.get("GOOGLE_API_KEY") and not os.environ.get(
             "GEMINI_API_KEY"
         ):
-            st.session_state.api_key = st.text_input("Gemini API Key", type="password")
-            st.markdown(
-                "[GEMINI API KEY](https://aistudio.google.com/app/api-keys) を取得して設定してください。"
+            st.session_state.api_key = st.text_input(
+                "[Gemini API Key](https://aistudio.google.com/app/api-keys)を取得して設定してください",
+                type="password",
             )
 
         select_example()
