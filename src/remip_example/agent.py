@@ -118,5 +118,4 @@ def build_agent(
         sub_agents=[remip_agent, mentor_agent],
         max_iterations=max_iterations,
     )
-    print("BUILD_AGENT", id(remip_agent.tools[0]), id(remip_agent), id(mentor_agent))
     return agent
