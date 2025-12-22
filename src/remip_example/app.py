@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import platform
 from queue import Empty, Queue
 import re
 import threading
@@ -230,7 +231,13 @@ def group_events(events: list[Event]) -> list[tuple[str, str, str, bool]]:
 
 
 def init():
-    ensure_node()
+    # Maybe Streamlit Community Cloud
+    if platform.processor() == "":
+        NODE_BIN_DIR = ensure_node()
+        if str(NODE_BIN_DIR) not in os.environ["PATH"]:
+            os.environ["PATH"] = os.pathsep.join(
+                (str(NODE_BIN_DIR), os.environ.get("PATH", ""))
+            )
 
     if "user_id" not in st.session_state:
         st.session_state.user_id = str(uuid.uuid4())
