@@ -72,6 +72,7 @@ class Worker:
                     new_message=message,
                     run_config=self._run_config,
                 )
+                self._new_message.clear()
                 async for event in agen:
                     # Append new message manualy
                     if invocation_id is None:
@@ -101,13 +102,7 @@ class Worker:
         return self._event_history
 
     def stop(self):
-        print("stop start")
         self._stop.set()
-        print("stop set")
-        # if self._thread and self._thread.is_alive():
-        #     print("stop join start")
-        #     self._thread.join(timeout=2)
-        #     print("stopped")
 
 
 def create_conversation_session(initial_prompt: str) -> dict[any]:
@@ -253,7 +248,7 @@ def select_example():
     examples = load_examples()
     selected_title = st.selectbox(
         "Choose an example",
-        ["自由記述"] + list(examples.keys()),
+        ["自由記述"] + sorted(list(examples.keys())),
     )
 
     if st.button("New Session", use_container_width=True):
@@ -279,6 +274,16 @@ def main():
             st.session_state.api_key = st.text_input("Gemini API Key", type="password")
 
         select_example()
+
+        with st.expander("デモについて", expanded=True):
+            st.markdown(f"""
+            数理最適化MCPを使って与えられた問題を自律的に解くデモです。以下の2人のエージェントで、ユーザーリクエストを満たすまで試行錯誤します。
+
+            - {AVATARS["remip_agent"]}: **数理最適化エージェント**
+              - 数理最適化問題に定式化して求解する
+            - {AVATARS["mentor_agent"]}: **メンターエージェント**
+              - 結果を確認してユーザーニーズを満たすか判断する
+            """)
 
     if not st.session_state.conversation_session:
         with st.form("Query"):

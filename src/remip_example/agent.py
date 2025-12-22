@@ -11,7 +11,6 @@ from google.adk.tools import BaseTool, ToolContext, exit_loop
 from google.genai import types
 from mcp.types import CallToolResult
 
-import streamlit as st
 
 from remip_example.config import (
     MENTOR_AGENT_INSTRUCTION,
@@ -62,7 +61,7 @@ def track_tool_calling(
     )
 
 
-@st.cache_resource
+# @st.cache_resource
 def build_agent(
     is_agent_mode: bool = True,
     max_iterations: int = 50,

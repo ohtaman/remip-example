@@ -108,7 +108,6 @@ def start_remip() -> int:
     return port
 
 
-@st.cache_resource
 def get_mcp_toolset() -> McpToolset:
     """Starts the MCP server and returns a cached toolset instance."""
     port = start_remip_mcp()
