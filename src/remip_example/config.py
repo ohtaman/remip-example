@@ -7,6 +7,22 @@ NORMAL_MAX_CALLS = 100
 
 EXAMPLES_DIR = "examples"
 
+USAGE = """
+与えられた数理最適化問題を2つのエージェントが協力して解きます。
+
+- {AVATARS["remip_agent"]}: **数理最適化エージェント**
+  - 数理最適化問題に定式化して求解する
+- {AVATARS["mentor_agent"]}: **メンターエージェント**
+  - 結果を確認してユーザーニーズを満たすか判断する
+
+### 使い方
+
+1. 環境変数 GEMINI_API_KEY が設定されていない場合は、 Gemini API Key を取得して入力
+2. Choose an example から好きな例題を選択
+3. Use this Example Prompt をクリック
+4. 必要に応じてQueryを修正してSubmit
+"""
+
 # --- MCP Server Constants ---
 MCP_PORT = 3333
 
