@@ -19,7 +19,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx
 from streamlit_autorefresh import st_autorefresh
 
 from remip_example.agent import build_agent
-from remip_example.config import APP_NAME, AVATARS
+from remip_example.config import APP_NAME, AVATARS, USAGE
 from remip_example.utils import load_examples
 
 
@@ -272,15 +272,8 @@ def main():
     st.set_page_config(page_title="ReMIP Example", page_icon="🎓")
 
     with st.sidebar:
-        with st.expander("このデモについて", expanded=False):
-            st.markdown(f"""
-            数理最適化MCPを使って与えられた問題を自律的に解くデモです。以下の2人のエージェントで、ユーザーリクエストを満たすまで試行錯誤します。
-
-            - {AVATARS["remip_agent"]}: **数理最適化エージェント**
-              - 数理最適化問題に定式化して求解する
-            - {AVATARS["mentor_agent"]}: **メンターエージェント**
-              - 結果を確認してユーザーニーズを満たすか判断する
-            """)
+        with st.expander("このデモについて", expanded=True):
+            st.markdown(USAGE)
 
         if not os.environ.get("GOOGLE_API_KEY") and not os.environ.get(
             "GEMINI_API_KEY"
