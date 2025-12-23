@@ -7,7 +7,7 @@ NORMAL_MAX_CALLS = 100
 
 EXAMPLES_DIR = "examples"
 
-USAGE = """
+USAGE = f"""
 与えられた数理最適化問題を2つのエージェントが協力して解きます。
 
 - {AVATARS["remip_agent"]}: **数理最適化エージェント**
