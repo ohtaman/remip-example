@@ -130,7 +130,8 @@ def process_event(event: Event) -> tuple[str | None, str | None, str | None]:
     response_markdown = ""
     thoughts_markdown = ""
 
-    for part in event.content.parts:
+    parts = event.content.parts or []
+    for part in parts:
         if part.thought:
             thoughts_markdown += part.text
         elif part.function_call:
